@@ -44,7 +44,10 @@ services:
       - "${BACKEND_PORT:-8000}:8000"
     volumes:
       - ./surfsense_backend/app:/app/app
+      - ./surfsense_backend/scripts:/app/scripts
       - shared_temp:/tmp
+      # Local ingest folder (Celestia forum markdown lives under /mnt/data/surfsense/docs)
+      - /mnt/data/surfsense/docs:/ingest/docs:ro
       # Uncomment and edit the line below to enable Obsidian vault indexing
       # - /path/to/your/obsidian/vault:/obsidian-vault:ro
     env_file:
@@ -62,7 +65,7 @@ services:
       - LANGSMITH_TRACING=false
       - ELECTRIC_DB_USER=${ELECTRIC_DB_USER:-electric}
       - ELECTRIC_DB_PASSWORD=${ELECTRIC_DB_PASSWORD:-electric_password}
-      - NEXT_FRONTEND_URL=http://frontend:3000
+      - NEXT_FRONTEND_URL=http://10.200.0.5:3000
     depends_on:
       - db
       - redis
