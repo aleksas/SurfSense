@@ -30,7 +30,10 @@ from urllib.parse import urljoin, urlparse
 import requests
 
 
-MOTHERLODE_DOCS_URL = "http://www.celestiamotherlode.net/catalog/documentation.html"
+CATALOG_URLS = [
+    "http://www.celestiamotherlode.net/catalog/documentation.html",
+    "http://celestiamotherlode.net/catalog/documentation.html",
+]
 
 
 @dataclass(frozen=True)
@@ -80,10 +83,23 @@ def _sanitize_name(s: str) -> str:
 
 def _is_english(text: str) -> bool:
     # Motherlode uses tags like "(French)" in link text for translations.
-    return not re.search(
+    if re.search(
         r"\b(French|German|Italian|Spanish|Russian|Polish|Portuguese|Japanese|Chinese|Korean)\b",
         text,
         flags=re.I,
+    ):
+        return False
+    return True
+
+
+def _looks_non_english_url(url: str) -> bool:
+    # Common language markers in filenames.
+    return bool(
+        re.search(
+            r"(\bRUS\b|\bFRA\b|\bFR\b|\bDEU\b|\bDE\b|\bITA\b|\bIT\b|\bESP\b|\bES\b|\bPOL\b|\bPT\b|\bJPN\b|\bJP\b|\bCHN\b|\bCN\b|\bKOR\b|\bKR\b)",
+            url,
+            flags=re.I,
+        )
     )
 
 
@@ -93,7 +109,6 @@ def _is_scripting_related(text: str, url: str) -> bool:
         "scripting",
         "script",
         "celx",
-        ".cel",
         "lua",
         "ssc",
         "stc",
@@ -124,30 +139,53 @@ def _wanted_extension(url: str) -> bool:
     )
 
 
-def _fetch_links(session: requests.Session) -> list[Link]:
-    r = session.get(MOTHERLODE_DOCS_URL, timeout=30)
-    r.raise_for_status()
+def _fetch_links(session: requests.Session, catalog_urls: list[str]) -> list[Link]:
+    last_err: Exception | None = None
+    for url in catalog_urls:
+        try:
+            r = session.get(url, timeout=30, allow_redirects=True)
+            r.raise_for_status()
+            base_url = r.url
+            html = r.text
+            break
+        except Exception as e:
+            last_err = e
+    else:
+        raise RuntimeError(f"Failed to fetch Motherlode catalog from {catalog_urls}: {last_err}")
 
     p = _LinkParser()
-    p.feed(r.text)
+    p.feed(html)
 
     out: list[Link] = []
     for link in p.links:
         if not link.url or link.url.startswith("#"):
             continue
-        full = urljoin(MOTHERLODE_DOCS_URL, link.url)
+        full = urljoin(base_url, link.url)
         out.append(Link(text=link.text, url=full))
     return out
 
 
 def _download(session: requests.Session, url: str, dest: Path) -> None:
     dest.parent.mkdir(parents=True, exist_ok=True)
-    with session.get(url, timeout=60, stream=True) as r:
-        r.raise_for_status()
-        with open(dest, "wb") as f:
-            for chunk in r.iter_content(chunk_size=1024 * 256):
-                if chunk:
-                    f.write(chunk)
+    last_err: Exception | None = None
+    for attempt in range(1, 4):
+        try:
+            with session.get(url, timeout=60, stream=True) as r:
+                r.raise_for_status()
+                with open(dest, "wb") as f:
+                    for chunk in r.iter_content(chunk_size=1024 * 256):
+                        if chunk:
+                            f.write(chunk)
+            return
+        except Exception as e:
+            last_err = e
+            # Basic retry/backoff; keep dependencies minimal.
+            if attempt < 3:
+                import time
+
+                time.sleep(1.5 * attempt)
+                continue
+            raise last_err
 
 
 def _maybe_unzip(path: Path, out_dir: Path) -> None:
@@ -167,6 +205,11 @@ def main() -> int:
     ap.add_argument("--out-folder", default="/tmp/celestia_motherlode_docs")
     ap.add_argument("--limit", type=int, default=30)
     ap.add_argument("--download-only", action="store_true")
+    ap.add_argument(
+        "--allow-external",
+        action="store_true",
+        help="Allow downloads from non-motherlode hosts (default: only celestiamotherlode.net).",
+    )
     ap.add_argument("--ingest", action="store_true", help="Run ingest_docs_tree.py after download.")
     args = ap.parse_args()
 
@@ -180,13 +223,22 @@ def main() -> int:
     session = requests.Session()
     session.headers.update({"User-Agent": "Mozilla/5.0 (SurfSense Celestia indexer)"})
 
-    links = _fetch_links(session)
+    links = _fetch_links(session, CATALOG_URLS)
 
     selected: list[Link] = []
     for link in links:
         if not link.text:
             continue
         if not _is_english(link.text):
+            continue
+        if _looks_non_english_url(link.url):
+            continue
+        if not args.allow_external:
+            host = urlparse(link.url).netloc.lower()
+            if not host.endswith("celestiamotherlode.net"):
+                continue
+        # Guardrails: the Motherlode catalog includes non-doc links; avoid obvious non-doc areas.
+        if re.search(r"(contactus|contactform|/php/)", link.url, flags=re.I):
             continue
         if not _is_scripting_related(link.text, link.url):
             continue
@@ -261,4 +313,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
