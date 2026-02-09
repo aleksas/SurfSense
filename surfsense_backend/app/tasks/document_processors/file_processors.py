@@ -36,6 +36,7 @@ from .base import (
     safe_set_chunks,
 )
 from .markdown_processor import add_received_markdown_file_document
+from app.utils.chunks_persistence import replace_document_chunks
 
 # Constants for LlamaCloud retry configuration
 LLAMACLOUD_MAX_RETRIES = 5  # Increased from 3 for large file resilience
@@ -1934,8 +1935,8 @@ async def process_file_in_background_with_document(
         }
         flag_modified(document, "document_metadata")
 
-        # Use safe_set_chunks to avoid async issues
-        safe_set_chunks(document, chunks)
+        # Persist chunks explicitly (safe_set_chunks only updates in-memory state).
+        await replace_document_chunks(session, document, chunks)
 
         document.blocknote_document = blocknote_json
         document.content_needs_reindexing = False

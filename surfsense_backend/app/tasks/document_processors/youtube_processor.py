@@ -26,6 +26,7 @@ from app.utils.document_converters import (
     generate_unique_identifier_hash,
 )
 from app.utils.proxy_config import get_requests_proxies
+from app.utils.chunks_persistence import replace_document_chunks
 
 from .base import (
     check_document_by_unique_identifier,
@@ -404,7 +405,7 @@ async def add_youtube_video_document(
             "author": video_data.get("author_name", "Unknown"),
             "thumbnail": video_data.get("thumbnail_url", ""),
         }
-        safe_set_chunks(document, chunks)
+        await replace_document_chunks(session, document, chunks)
         document.blocknote_document = blocknote_json
         document.status = DocumentStatus.ready()  # READY status - fully processed
         document.updated_at = get_current_timestamp()

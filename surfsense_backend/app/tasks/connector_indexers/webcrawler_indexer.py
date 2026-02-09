@@ -24,6 +24,7 @@ from app.utils.document_converters import (
     generate_document_summary,
     generate_unique_identifier_hash,
 )
+from app.utils.chunks_persistence import replace_document_chunks
 from app.utils.webcrawler_utils import parse_webcrawler_urls
 
 from .base import (
@@ -426,7 +427,7 @@ async def index_crawled_urls(
                     "indexed_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                     "connector_id": connector_id,
                 }
-                safe_set_chunks(document, chunks)
+                await replace_document_chunks(session, document, chunks)
                 document.status = DocumentStatus.ready()  # READY status
                 document.updated_at = get_current_timestamp()
 

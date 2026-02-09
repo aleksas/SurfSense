@@ -26,6 +26,7 @@ from app.db import (
     SearchSpace,
 )
 from app.services.llm_service import get_document_summary_llm
+from app.utils.chunks_persistence import replace_document_chunks
 from app.utils.document_converters import (
     create_document_chunks,
     generate_content_hash,
@@ -234,7 +235,7 @@ async def add_circleback_meeting_document(
         if summary_embedding is not None:
             document.embedding = summary_embedding
         document.document_metadata = document_metadata
-        safe_set_chunks(document, chunks)
+        await replace_document_chunks(session, document, chunks)
         document.blocknote_document = blocknote_json
         document.content_needs_reindexing = False
         document.updated_at = get_current_timestamp()

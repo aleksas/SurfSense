@@ -316,6 +316,16 @@ class Config:
         EMBEDDING_MODEL,
         **embedding_kwargs,
     )
+    # Prefer GPU for embeddings when available (container must be started with GPU access).
+    try:
+        import torch
+
+        if torch.cuda.is_available():
+            st_model = getattr(embedding_model_instance, "model", None)
+            if st_model is not None and hasattr(st_model, "to"):
+                st_model.to("cuda")
+    except Exception:
+        pass
     chunker_instance = RecursiveChunker(
         chunk_size=getattr(embedding_model_instance, "max_seq_length", 512)
     )
@@ -325,15 +335,26 @@ class Config:
 
     # Reranker's Configuration | Pinecone, Cohere etc. Read more at https://github.com/AnswerDotAI/rerankers?tab=readme-ov-file#usage
     RERANKERS_ENABLED = os.getenv("RERANKERS_ENABLED", "FALSE").upper() == "TRUE"
+    reranker_instance = None
     if RERANKERS_ENABLED:
         RERANKERS_MODEL_NAME = os.getenv("RERANKERS_MODEL_NAME")
         RERANKERS_MODEL_TYPE = os.getenv("RERANKERS_MODEL_TYPE")
-        reranker_instance = Reranker(
-            model_name=RERANKERS_MODEL_NAME,
-            model_type=RERANKERS_MODEL_TYPE,
-        )
-    else:
-        reranker_instance = None
+        # FlashRank downloads model artifacts; make it robust against races between
+        # backend/worker/beat processes importing config at the same time.
+        RERANKERS_CACHE_DIR = os.getenv("RERANKERS_CACHE_DIR", "/tmp/flashrank_cache")
+        try:
+            os.makedirs(RERANKERS_CACHE_DIR, exist_ok=True)
+        except Exception:
+            pass
+        try:
+            reranker_instance = Reranker(
+                model_name=RERANKERS_MODEL_NAME,
+                model_type=RERANKERS_MODEL_TYPE,
+                cache_dir=RERANKERS_CACHE_DIR,
+            )
+        except Exception as e:
+            print(f"Warning: Failed to initialize reranker ({RERANKERS_MODEL_TYPE}): {e}")
+            reranker_instance = None
 
     # OAuth JWT
     SECRET_KEY = os.getenv("SECRET_KEY")

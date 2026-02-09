@@ -19,6 +19,7 @@ from app.connectors.confluence_history import ConfluenceHistoryConnector
 from app.db import Document, DocumentStatus, DocumentType, SearchSourceConnectorType
 from app.services.llm_service import get_user_long_context_llm
 from app.services.task_logging_service import TaskLoggingService
+from app.utils.chunks_persistence import replace_document_chunks
 from app.utils.document_converters import (
     create_document_chunks,
     generate_content_hash,
@@ -423,7 +424,7 @@ async def index_confluence_pages(
                     "indexed_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                     "connector_id": connector_id,
                 }
-                safe_set_chunks(document, chunks)
+                await replace_document_chunks(session, document, chunks)
                 document.updated_at = get_current_timestamp()
                 document.status = DocumentStatus.ready()
 

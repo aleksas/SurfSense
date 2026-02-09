@@ -64,11 +64,23 @@ async def ingest(
     limit: int | None,
     glob: str,
     dry_run: bool,
+    reindex_existing: bool,
 ) -> int:
     if not folder.exists():
         raise RuntimeError(f"Folder not found inside container: {folder}")
 
-    files = sorted(folder.glob(glob))
+    # Sort numerically by thread id when possible (thread_123.md), otherwise by name.
+    # Lexicographic sorting can put thread_10000.md near the start, making progress appear
+    # "stuck" on very large threads early in the run.
+    def _sort_key(p: Path) -> tuple[int, int | str]:
+        stem = p.stem
+        if stem.startswith("thread_"):
+            suffix = stem.removeprefix("thread_")
+            if suffix.isdigit():
+                return (0, int(suffix))
+        return (1, p.name)
+
+    files = sorted(folder.glob(glob), key=_sort_key)
     if not files:
         raise RuntimeError(f"No files matched {glob} under {folder}")
 
@@ -79,6 +91,7 @@ async def ingest(
     tmp_dir.mkdir(parents=True, exist_ok=True)
 
     created = 0
+    reindexed = 0
     skipped_existing = 0
     processed_ok = 0
     processed_failed = 0
@@ -121,38 +134,58 @@ async def ingest(
             )
 
             existing = await check_document_by_unique_identifier(session, unique_identifier_hash)
-            if existing:
+            if existing and not reindex_existing:
                 skipped_existing += 1
                 if skipped_existing <= 5 or skipped_existing % 250 == 0:
                     print(f"[{idx}/{len(files)}] skip existing: {filename} (doc_id={existing.id})")
                 continue
 
-            created += 1
+            if existing:
+                reindexed += 1
+            else:
+                created += 1
+
             if dry_run:
-                if created <= 5 or created % 250 == 0:
-                    print(f"[{idx}/{len(files)}] would ingest: {filename}")
+                # Keep output stable regardless of created vs reindexed.
+                if (created + reindexed) <= 5 or (created + reindexed) % 250 == 0:
+                    action = "would reindex" if existing else "would ingest"
+                    print(f"[{idx}/{len(files)}] {action}: {filename}")
                 continue
 
-            # Phase 1: create a pending doc (mirrors /documents/fileupload behavior)
-            document = Document(
-                search_space_id=ss_id,
-                title=filename,
-                document_type=DocumentType.FILE,
-                document_metadata={
+            if existing:
+                # Reindex in-place: flip to pending and update source_path metadata.
+                document = existing
+                document.status = DocumentStatus.pending()
+                document.updated_at = get_current_timestamp()
+                document.document_metadata = {
+                    **(document.document_metadata or {}),
                     "FILE_NAME": filename,
                     "source_path": str(src),
-                },
-                content="Processing...",
-                content_hash=unique_identifier_hash,  # placeholder until ready
-                unique_identifier_hash=unique_identifier_hash,
-                embedding=None,
-                status=DocumentStatus.pending(),
-                updated_at=get_current_timestamp(),
-                created_by_id=str(user.id),
-            )
-            session.add(document)
-            await session.commit()
-            await session.refresh(document)
+                    "reindexed_at": get_current_timestamp().isoformat(),
+                }
+                await session.commit()
+                await session.refresh(document)
+            else:
+                # Phase 1: create a pending doc (mirrors /documents/fileupload behavior)
+                document = Document(
+                    search_space_id=ss_id,
+                    title=filename,
+                    document_type=DocumentType.FILE,
+                    document_metadata={
+                        "FILE_NAME": filename,
+                        "source_path": str(src),
+                    },
+                    content="Processing...",
+                    content_hash=unique_identifier_hash,  # placeholder until ready
+                    unique_identifier_hash=unique_identifier_hash,
+                    embedding=None,
+                    status=DocumentStatus.pending(),
+                    updated_at=get_current_timestamp(),
+                    created_by_id=str(user.id),
+                )
+                session.add(document)
+                await session.commit()
+                await session.refresh(document)
 
             log_entry = await task_logger.log_task_start(
                 task_name="celestia_forum_ingest",
@@ -196,11 +229,11 @@ async def ingest(
             if idx <= 5 or idx % 100 == 0:
                 print(
                     f"[{idx}/{len(files)}] ok={processed_ok} failed={processed_failed} "
-                    f"created={created} skipped_existing={skipped_existing}"
+                    f"created={created} reindexed={reindexed} skipped_existing={skipped_existing}"
                 )
 
     print(
-        f"Done. created={created} skipped_existing={skipped_existing} "
+        f"Done. created={created} reindexed={reindexed} skipped_existing={skipped_existing} "
         f"processed_ok={processed_ok} processed_failed={processed_failed}"
     )
     return 0 if processed_failed == 0 else 2
@@ -214,6 +247,11 @@ def main() -> None:
     ap.add_argument("--glob", default="thread_*.md")
     ap.add_argument("--limit", type=int, default=None)
     ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument(
+        "--reindex-existing",
+        action="store_true",
+        help="Reprocess already-ingested docs (updates content + embeddings + chunks in-place).",
+    )
     args = ap.parse_args()
 
     # Avoid hard crash if someone mounts a different path.
@@ -228,6 +266,7 @@ def main() -> None:
                 limit=args.limit,
                 glob=args.glob,
                 dry_run=args.dry_run,
+                reindex_existing=args.reindex_existing,
             )
         )
     )
