@@ -47,6 +47,7 @@ from app.utils.document_converters import generate_unique_identifier_hash
 
 
 DEFAULT_FOLDER = Path("/ingest/docs/scripting_knowledge_base_docs")
+DEFAULT_EXTENSIONS = {".md", ".txt", ".rst", ".adoc", ".pdf", ".doc", ".docx"}
 
 
 async def _resolve_search_space_id(session, user_id: str, explicit_id: int | None) -> int:
@@ -64,8 +65,14 @@ async def _resolve_search_space_id(session, user_id: str, explicit_id: int | Non
     return int(search_space_id)
 
 
-def _iter_files(folder: Path, glob: str) -> list[Path]:
-    files = [p for p in folder.glob(glob) if p.is_file()]
+def _iter_files(folder: Path, glob: str, extensions: set[str]) -> list[Path]:
+    files: list[Path] = []
+    for p in folder.glob(glob):
+        if not p.is_file():
+            continue
+        if p.suffix.lower() not in extensions:
+            continue
+        files.append(p)
     files.sort(key=lambda p: p.as_posix())
     return files
 
@@ -77,13 +84,14 @@ async def ingest(
     search_space_id: int | None,
     limit: int | None,
     glob: str,
+    extensions: set[str],
     dry_run: bool,
     reindex_existing: bool,
 ) -> int:
     if not folder.exists():
         raise RuntimeError(f"Folder not found inside container: {folder}")
 
-    files = _iter_files(folder, glob)
+    files = _iter_files(folder, glob, extensions)
     if not files:
         raise RuntimeError(f"No files matched {glob} under {folder}")
 
@@ -239,7 +247,12 @@ def main() -> None:
     ap.add_argument("--email", default="test@example.com")
     ap.add_argument("--folder", default=str(DEFAULT_FOLDER))
     ap.add_argument("--search-space-id", type=int, default=None)
-    ap.add_argument("--glob", default="**/*.md")
+    ap.add_argument("--glob", default="**/*")
+    ap.add_argument(
+        "--extensions",
+        default=",".join(sorted(DEFAULT_EXTENSIONS)),
+        help="Comma-separated file extensions to ingest (default includes md/txt/rst/adoc/pdf/doc/docx).",
+    )
     ap.add_argument("--limit", type=int, default=None)
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument(
@@ -250,6 +263,9 @@ def main() -> None:
     args = ap.parse_args()
 
     folder = Path(args.folder)
+    extensions = {e.strip().lower() for e in args.extensions.split(",") if e.strip()}
+    if not extensions:
+        raise SystemExit("No extensions configured. Example: --extensions .md,.pdf")
 
     raise SystemExit(
         asyncio.run(
@@ -259,6 +275,7 @@ def main() -> None:
                 search_space_id=args.search_space_id,
                 limit=args.limit,
                 glob=args.glob,
+                extensions=extensions,
                 dry_run=args.dry_run,
                 reindex_existing=args.reindex_existing,
             )
@@ -268,4 +285,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
