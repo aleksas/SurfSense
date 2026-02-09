@@ -47,7 +47,18 @@ from app.utils.document_converters import generate_unique_identifier_hash
 
 
 DEFAULT_FOLDER = Path("/ingest/docs/scripting_knowledge_base_docs")
-DEFAULT_EXTENSIONS = {".md", ".txt", ".rst", ".adoc", ".pdf", ".doc", ".docx"}
+DEFAULT_EXTENSIONS = {
+    ".md",
+    ".txt",
+    ".rst",
+    ".adoc",
+    ".html",
+    ".htm",
+    ".rtf",
+    ".pdf",
+    ".doc",
+    ".docx",
+}
 
 
 async def _resolve_search_space_id(session, user_id: str, explicit_id: int | None) -> int:
