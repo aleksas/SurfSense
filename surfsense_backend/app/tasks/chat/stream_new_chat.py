@@ -97,10 +97,21 @@ _IMAGE_INTENT_KEYWORDS = (
     "create image",
 )
 
+_FORUM_LOOKUP_KEYWORDS = (
+    "forum",
+    "post",
+    "thread",
+    "motherlode",
+)
+
 
 
 _CHUNK_XML_PATTERN = re.compile(
     r"<chunk(?: id='(?P<chunk_id>[^']+)')?><!\[CDATA\[(?P<content>.*?)\]\]></chunk>",
+    re.DOTALL,
+)
+_TITLE_XML_PATTERN = re.compile(
+    r"<title><!\[CDATA\[(?P<title>.*?)\]\]></title>",
     re.DOTALL,
 )
 
@@ -150,6 +161,40 @@ def _extract_kb_snippets(
     return snippets
 
 
+def _extract_first_document_title(xml_text: str) -> str | None:
+    """Extract the first document title from XML returned by search_knowledge_base."""
+    if not xml_text:
+        return None
+    match = _TITLE_XML_PATTERN.search(xml_text)
+    if not match:
+        return None
+    title = (match.group("title") or "").strip()
+    return title or None
+
+
+def _extract_text_from_chat_content(content: object) -> str:
+    """Extract plain text from stored chat message JSON content."""
+    if isinstance(content, str):
+        return content
+
+    if isinstance(content, list):
+        parts: list[str] = []
+        for item in content:
+            if not isinstance(item, dict):
+                continue
+            text = item.get("text")
+            if isinstance(text, str) and text.strip():
+                parts.append(text.strip())
+        return "\n".join(parts).strip()
+
+    if isinstance(content, dict):
+        text = content.get("text")
+        if isinstance(text, str):
+            return text.strip()
+
+    return ""
+
+
 def _should_enable_web_tools(user_query: str) -> bool:
     """
     Decide whether webpage tools should be enabled for this turn.
@@ -190,6 +235,23 @@ def _has_image_intent(user_query: str) -> bool:
     if not query:
         return False
     return any(keyword in query for keyword in _IMAGE_INTENT_KEYWORDS)
+
+
+def _has_forum_lookup_intent(user_query: str) -> bool:
+    """
+    Detect explicit requests to find/return forum posts.
+    These are handled with stricter grounding from retrieved chunks.
+    """
+    query = (user_query or "").strip().lower()
+    if not query:
+        return False
+
+    has_forum_term = any(keyword in query for keyword in _FORUM_LOOKUP_KEYWORDS)
+    has_lookup_verb = any(
+        keyword in query
+        for keyword in ("find", "related", "return", "show", "lookup", "search")
+    )
+    return has_forum_term and has_lookup_verb
 
 
 def format_attachments_as_context(attachments: list[ChatAttachment]) -> str:
@@ -448,6 +510,7 @@ async def stream_new_chat(
 
         # Get the PostgreSQL checkpointer for persistent conversation memory
         checkpointer = await get_checkpointer()
+        forum_lookup_intent = _has_forum_lookup_intent(user_query)
 
         # Disable raw webpage tools for non-web queries so local KB search remains primary.
         # This avoids bad tool trajectories (e.g., scraping fabricated example.com URLs).
@@ -467,9 +530,90 @@ async def stream_new_chat(
         if not _has_image_intent(user_query):
             disabled_tools_set.update({"generate_image", "display_image"})
 
+        # For explicit forum-post lookups, keep toolset focused on KB retrieval.
+        if forum_lookup_intent:
+            disabled_tools_set.add("generate_podcast")
+
         disabled_tools_for_turn = (
             sorted(disabled_tools_set) if disabled_tools_set else None
         )
+
+        # Deterministic forum lookup path:
+        # bypass free-form generation and return grounded result from indexed forum chunks.
+        if forum_lookup_intent:
+            from app.agents.new_chat.tools.knowledge_base import search_knowledge_base_async
+            from app.db import NewChatMessage, NewChatMessageRole
+
+            # Try to enrich vague follow-ups ("related forum posts") with previous user topic.
+            contextual_query = user_query
+            recent_result = await session.execute(
+                select(NewChatMessage)
+                .filter(NewChatMessage.thread_id == chat_id)
+                .order_by(NewChatMessage.id.desc())
+                .limit(8)
+            )
+            current_norm = (user_query or "").strip().lower()
+            for msg in recent_result.scalars().all():
+                if msg.role != NewChatMessageRole.USER:
+                    continue
+                text = _extract_text_from_chat_content(msg.content)
+                if text and text.strip().lower() != current_norm:
+                    contextual_query = (
+                        f"{user_query}\nRelated topic from prior user message: {text[:240]}"
+                    )
+                    break
+
+            # Stream deterministic response in the same SSE envelope expected by frontend.
+            yield streaming_service.format_message_start()
+            yield streaming_service.format_start_step()
+            step_id = "thinking-1"
+            yield streaming_service.format_thinking_step(
+                step_id=step_id,
+                title="Searching knowledge base",
+                status="in_progress",
+                items=[
+                    f"Query: {contextual_query[:120]}{'...' if len(contextual_query) > 120 else ''}"
+                ],
+            )
+
+            kb_xml = await search_knowledge_base_async(
+                query=contextual_query,
+                search_space_id=search_space_id,
+                db_session=session,
+                connector_service=connector_service,
+                connectors_to_search=["FILE"],
+                top_k=10,
+                available_connectors=["FILE"],
+            )
+
+            kb_snippets = _extract_kb_snippets(kb_xml, max_snippets=1)
+            if kb_snippets:
+                title = _extract_first_document_title(kb_xml) or "forum thread"
+                chunk_id, snippet = kb_snippets[0]
+                chunk_label = f"[chunk {chunk_id}] " if chunk_id else ""
+                final_text = (
+                    f"Most related forum post: {title}\n"
+                    f"{chunk_label}{snippet}"
+                )
+            else:
+                final_text = (
+                    "I could not find a matching forum post in indexed data for this request."
+                )
+
+            yield streaming_service.format_thinking_step(
+                step_id=step_id,
+                title="Searching knowledge base",
+                status="completed",
+                items=["Search completed"],
+            )
+            text_id = streaming_service.generate_text_id()
+            yield streaming_service.format_text_start(text_id)
+            yield streaming_service.format_text_delta(text_id, final_text)
+            yield streaming_service.format_text_end(text_id)
+            yield streaming_service.format_finish_step()
+            yield streaming_service.format_finish()
+            yield streaming_service.format_done()
+            return
 
         # Create the deep agent with checkpointer and configurable prompts
         agent = await create_surfsense_deep_agent(
@@ -710,6 +854,11 @@ async def stream_new_chat(
                 if chunk and hasattr(chunk, "content"):
                     content = chunk.content
                     if content and isinstance(content, str):
+                        # For explicit forum lookups, suppress free-form generation and
+                        # emit a deterministic grounded result after tool execution.
+                        if forum_lookup_intent:
+                            continue
+
                         # Start a new text block if needed
                         if current_text_id is None:
                             # Complete any previous step
@@ -1383,6 +1532,28 @@ async def stream_new_chat(
         # Ensure text block is closed
         if current_text_id is not None:
             yield streaming_service.format_text_end(current_text_id)
+
+        # For explicit forum lookups, emit a deterministic grounded answer from KB chunks.
+        if forum_lookup_intent:
+            kb_snippets = _extract_kb_snippets(last_kb_tool_output_text, max_snippets=1)
+            if kb_snippets:
+                title = _extract_first_document_title(last_kb_tool_output_text) or "forum thread"
+                chunk_id, snippet = kb_snippets[0]
+                chunk_label = f"[chunk {chunk_id}] " if chunk_id else ""
+                forum_text = (
+                    f"Most related forum post: {title}\n"
+                    f"{chunk_label}{snippet}"
+                )
+            else:
+                forum_text = (
+                    "I could not find a matching forum post in indexed data for this request."
+                )
+
+            forum_text_id = streaming_service.generate_text_id()
+            yield streaming_service.format_text_start(forum_text_id)
+            yield streaming_service.format_text_delta(forum_text_id, forum_text)
+            yield streaming_service.format_text_end(forum_text_id)
+            accumulated_text = forum_text
 
         # Some models/tool combinations can return empty final content.
         # Emit a deterministic fallback so the UI never shows a blank assistant reply.
