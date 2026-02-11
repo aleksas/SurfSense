@@ -152,6 +152,9 @@ BUILTIN_TOOLS: list[ToolDefinition] = [
         description="Search Surfsense documentation for help with using the application",
         factory=lambda deps: create_search_surfsense_docs_tool(
             db_session=deps["db_session"],
+            search_space_id=deps.get("search_space_id"),
+            connector_service=deps.get("connector_service"),
+            available_connectors=deps.get("available_connectors"),
         ),
         requires=["db_session"],
     ),

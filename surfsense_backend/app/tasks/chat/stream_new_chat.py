@@ -10,6 +10,7 @@ Supports loading LLM configurations from:
 """
 
 import json
+import re
 from collections.abc import AsyncGenerator
 from uuid import UUID
 
@@ -36,6 +37,159 @@ from app.services.chat_session_state_service import (
 from app.services.connector_service import ConnectorService
 from app.services.new_streaming_service import VercelStreamingService
 from app.utils.content_utils import bootstrap_history_from_db
+
+
+_URL_PATTERN = re.compile(r"(https?://|www\.)", re.IGNORECASE)
+_WEB_INTENT_KEYWORDS = (
+    "web",
+    "website",
+    "url",
+    "link",
+    "article",
+    "blog",
+    "page",
+    "scrape",
+    "browse",
+    "internet",
+    "online",
+)
+
+_SURFSENSE_PRODUCT_KEYWORDS = (
+    "surfsense",
+    "search space",
+    "connector",
+    "connectors",
+    "browser extension",
+    "mcp",
+    "rbac",
+    "permissions",
+    "llm config",
+    "image generation",
+    "podcast generation",
+    "docker",
+    "setup",
+    "installation",
+    "install",
+    "api key",
+)
+
+_MEMORY_INTENT_KEYWORDS = (
+    "remember",
+    "memory",
+    "recall",
+    "what do you know about me",
+    "my preferences",
+    "my preference",
+    "keep this in mind",
+)
+
+_IMAGE_INTENT_KEYWORDS = (
+    "image",
+    "picture",
+    "photo",
+    "draw",
+    "illustration",
+    "artwork",
+    "logo",
+    "render",
+    "screenshot",
+    "generate image",
+    "create image",
+)
+
+
+
+_CHUNK_XML_PATTERN = re.compile(
+    r"<chunk(?: id='(?P<chunk_id>[^']+)')?><!\[CDATA\[(?P<content>.*?)\]\]></chunk>",
+    re.DOTALL,
+)
+
+
+def _tool_output_to_text(tool_output: object) -> str:
+    """Best-effort extraction of text payload from tool output objects."""
+    if isinstance(tool_output, str):
+        return tool_output
+
+    if isinstance(tool_output, dict):
+        for key in ("result", "content", "text"):
+            value = tool_output.get(key)
+            if isinstance(value, str):
+                return value
+        try:
+            return json.dumps(tool_output, ensure_ascii=False)
+        except Exception:
+            return str(tool_output)
+
+    return str(tool_output) if tool_output is not None else ""
+
+
+def _extract_kb_snippets(
+    xml_text: str,
+    max_snippets: int = 3,
+) -> list[tuple[str | None, str]]:
+    """
+    Extract concise chunk excerpts from XML returned by search_knowledge_base.
+    Returns (chunk_id, excerpt) tuples in retrieval order.
+    """
+    snippets: list[tuple[str | None, str]] = []
+    if not xml_text:
+        return snippets
+
+    for match in _CHUNK_XML_PATTERN.finditer(xml_text):
+        chunk_id = match.group("chunk_id")
+        raw = (match.group("content") or "").strip()
+        if not raw:
+            continue
+
+        compact = " ".join(raw.split())
+        excerpt = compact[:260] + ("..." if len(compact) > 260 else "")
+        snippets.append((chunk_id, excerpt))
+        if len(snippets) >= max_snippets:
+            break
+
+    return snippets
+
+
+def _should_enable_web_tools(user_query: str) -> bool:
+    """
+    Decide whether webpage tools should be enabled for this turn.
+
+    Web tools are useful when the user explicitly asks for web/URL handling.
+    For local knowledge-base questions (forum posts, indexed docs), keeping these
+    disabled prevents the model from hallucinating external URLs like example.com.
+    """
+    query = (user_query or "").strip().lower()
+    if not query:
+        return False
+
+    if _URL_PATTERN.search(query):
+        return True
+
+    return any(keyword in query for keyword in _WEB_INTENT_KEYWORDS)
+
+
+def _is_surfsense_product_query(user_query: str) -> bool:
+    """Whether the query is about using SurfSense itself."""
+    query = (user_query or "").strip().lower()
+    if not query:
+        return False
+    return any(keyword in query for keyword in _SURFSENSE_PRODUCT_KEYWORDS)
+
+
+def _has_memory_intent(user_query: str) -> bool:
+    """Whether the user explicitly asks for save/recall memory behavior."""
+    query = (user_query or "").strip().lower()
+    if not query:
+        return False
+    return any(keyword in query for keyword in _MEMORY_INTENT_KEYWORDS)
+
+
+def _has_image_intent(user_query: str) -> bool:
+    """Whether the user explicitly asks for image generation/display."""
+    query = (user_query or "").strip().lower()
+    if not query:
+        return False
+    return any(keyword in query for keyword in _IMAGE_INTENT_KEYWORDS)
 
 
 def format_attachments_as_context(attachments: list[ChatAttachment]) -> str:
@@ -295,6 +449,28 @@ async def stream_new_chat(
         # Get the PostgreSQL checkpointer for persistent conversation memory
         checkpointer = await get_checkpointer()
 
+        # Disable raw webpage tools for non-web queries so local KB search remains primary.
+        # This avoids bad tool trajectories (e.g., scraping fabricated example.com URLs).
+        disabled_tools_set: set[str] = set()
+        if not _should_enable_web_tools(user_query):
+            disabled_tools_set.update({"scrape_webpage", "link_preview"})
+
+        # For non-product queries, force personal KB tool usage path.
+        if not _is_surfsense_product_query(user_query):
+            disabled_tools_set.add("search_surfsense_docs")
+
+        # Keep memory tools opt-in to avoid off-topic memory loops on factual lookups.
+        if not _has_memory_intent(user_query):
+            disabled_tools_set.update({"save_memory", "recall_memory"})
+
+        # Keep image tools opt-in so coding/search requests don't misroute to image gen.
+        if not _has_image_intent(user_query):
+            disabled_tools_set.update({"generate_image", "display_image"})
+
+        disabled_tools_for_turn = (
+            sorted(disabled_tools_set) if disabled_tools_set else None
+        )
+
         # Create the deep agent with checkpointer and configurable prompts
         agent = await create_surfsense_deep_agent(
             llm=llm,
@@ -305,6 +481,7 @@ async def stream_new_chat(
             user_id=user_id,  # Pass user ID for memory tools
             thread_id=chat_id,  # Pass chat ID for podcast association
             agent_config=agent_config,  # Pass prompt configuration
+            disabled_tools=disabled_tools_for_turn,
             firecrawl_api_key=firecrawl_api_key,  # Pass Firecrawl API key if configured
         )
 
@@ -427,6 +604,8 @@ async def stream_new_chat(
         # Track write_todos calls to show "Creating plan" vs "Updating plan"
         # Disabled for now
         # write_todos_call_count: int = 0
+        # Keep raw KB tool output in case the model returns an empty final answer.
+        last_kb_tool_output_text: str = ""
 
         def next_thinking_step_id() -> str:
             nonlocal thinking_step_counter
@@ -1155,6 +1334,7 @@ async def stream_new_chat(
                             "error",
                         )
                 elif tool_name == "search_knowledge_base":
+                    last_kb_tool_output_text = _tool_output_to_text(tool_output)
                     # Don't stream the full output for search (can be very large), just acknowledge
                     yield streaming_service.format_tool_output_available(
                         tool_call_id,
@@ -1203,6 +1383,28 @@ async def stream_new_chat(
         # Ensure text block is closed
         if current_text_id is not None:
             yield streaming_service.format_text_end(current_text_id)
+
+        # Some models/tool combinations can return empty final content.
+        # Emit a deterministic fallback so the UI never shows a blank assistant reply.
+        if not accumulated_text.strip():
+            kb_snippets = _extract_kb_snippets(last_kb_tool_output_text)
+            if kb_snippets:
+                lines = ["I found matches in indexed content. Exact excerpts:"]
+                for chunk_id, snippet in kb_snippets:
+                    prefix = f"[chunk {chunk_id}] " if chunk_id else ""
+                    lines.append(f"- {prefix}{snippet}")
+                fallback_text = "\n".join(lines)
+            else:
+                fallback_text = (
+                    "The selected model returned an empty response for this query. "
+                    "Try switching to `mistral-small` for better reliability."
+                )
+
+            fallback_text_id = streaming_service.generate_text_id()
+            yield streaming_service.format_text_start(fallback_text_id)
+            yield streaming_service.format_text_delta(fallback_text_id, fallback_text)
+            yield streaming_service.format_text_end(fallback_text_id)
+            accumulated_text = fallback_text
 
         # Mark the last active thinking step as completed using the same title
         completion_event = complete_current_step()

@@ -16,6 +16,35 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import config
 from app.db import SurfsenseDocsChunk, SurfsenseDocsDocument
+from app.services.connector_service import ConnectorService
+
+# Queries containing these terms are likely asking about SurfSense product usage
+# rather than user-ingested content.
+SURFSENSE_PRODUCT_KEYWORDS = (
+    "surfsense",
+    "search space",
+    "connector",
+    "connectors",
+    "browser extension",
+    "mcp",
+    "rbac",
+    "permissions",
+    "llm config",
+    "image generation",
+    "podcast generation",
+    "docker",
+    "setup",
+    "installation",
+    "install",
+    "api key",
+)
+
+
+def _is_surfsense_product_query(query: str) -> bool:
+    q = (query or "").strip().lower()
+    if not q:
+        return False
+    return any(keyword in q for keyword in SURFSENSE_PRODUCT_KEYWORDS)
 
 
 def format_surfsense_docs_results(results: list[tuple]) -> str:
@@ -87,6 +116,9 @@ async def search_surfsense_docs_async(
     query: str,
     db_session: AsyncSession,
     top_k: int = 10,
+    search_space_id: int | None = None,
+    connector_service: ConnectorService | None = None,
+    available_connectors: list[str] | None = None,
 ) -> str:
     """
     Search Surfsense documentation using vector similarity.
@@ -99,6 +131,26 @@ async def search_surfsense_docs_async(
     Returns:
         Formatted string with relevant documentation content
     """
+    # If this does not look like a SurfSense product question, route to the
+    # personal knowledge base search so user-ingested docs are returned.
+    if (
+        not _is_surfsense_product_query(query)
+        and search_space_id is not None
+        and connector_service is not None
+    ):
+        from app.agents.new_chat.tools.knowledge_base import search_knowledge_base_async
+
+        kb_results = await search_knowledge_base_async(
+            query=query,
+            search_space_id=search_space_id,
+            db_session=db_session,
+            connector_service=connector_service,
+            top_k=top_k,
+            available_connectors=available_connectors,
+        )
+        if kb_results:
+            return kb_results
+
     # Get embedding for the query
     query_embedding = config.embedding_model_instance.embed(query)
 
@@ -119,7 +171,12 @@ async def search_surfsense_docs_async(
     return format_surfsense_docs_results(rows)
 
 
-def create_search_surfsense_docs_tool(db_session: AsyncSession):
+def create_search_surfsense_docs_tool(
+    db_session: AsyncSession,
+    search_space_id: int | None = None,
+    connector_service: ConnectorService | None = None,
+    available_connectors: list[str] | None = None,
+):
     """
     Factory function to create the search_surfsense_docs tool.
 
@@ -145,7 +202,10 @@ def create_search_surfsense_docs_tool(db_session: AsyncSession):
         - API documentation
 
         This searches the official Surfsense documentation that was indexed
-        at deployment time. It does NOT search the user's personal knowledge base.
+        at deployment time.
+
+        If the query appears to be about user content (not SurfSense product usage),
+        the tool automatically routes the request to the personal knowledge base search.
 
         Args:
             query: The search query about Surfsense usage or features
@@ -158,6 +218,9 @@ def create_search_surfsense_docs_tool(db_session: AsyncSession):
             query=query,
             db_session=db_session,
             top_k=top_k,
+            search_space_id=search_space_id,
+            connector_service=connector_service,
+            available_connectors=available_connectors,
         )
 
     return search_surfsense_docs

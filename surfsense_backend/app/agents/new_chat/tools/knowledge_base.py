@@ -22,6 +22,14 @@ from app.services.connector_service import ConnectorService
 # Connector Constants and Normalization
 # =============================================================================
 
+# Keep tool output bounded so retrieval context stays fast and token-safe.
+# Large contexts can trigger deepagents large-tool-result file handoffs, which
+# degrade reliability for simple factual lookups. These tighter limits keep
+# answers grounded while remaining small enough to return inline.
+MAX_DOCS_IN_CONTEXT = 3
+MAX_CHUNKS_PER_DOC_IN_CONTEXT = 6
+MAX_CONTEXT_CHARS = 20_000
+
 # Canonical connector values used internally by ConnectorService
 # Includes all document types and search source connectors
 _ALL_CONNECTORS: list[str] = [
@@ -268,7 +276,13 @@ def format_documents_for_context(documents: list[dict[str, Any]]) -> str:
 
     # Render XML expected by citation instructions
     parts: list[str] = []
+    total_chars = 0
+    docs_written = 0
+
     for g in grouped.values():
+        if docs_written >= MAX_DOCS_IN_CONTEXT or total_chars >= MAX_CONTEXT_CHARS:
+            break
+
         metadata_json = json.dumps(g["metadata"], ensure_ascii=False)
 
         parts.append("<document>")
@@ -282,17 +296,25 @@ def format_documents_for_context(documents: list[dict[str, Any]]) -> str:
         parts.append("")
         parts.append("<document_content>")
 
+        chunks_written = 0
         for ch in g["chunks"]:
+            if chunks_written >= MAX_CHUNKS_PER_DOC_IN_CONTEXT:
+                break
             ch_content = ch["content"]
             ch_id = ch["chunk_id"]
+            if total_chars + len(ch_content) > MAX_CONTEXT_CHARS:
+                break
             if ch_id is None:
                 parts.append(f"  <chunk><![CDATA[{ch_content}]]></chunk>")
             else:
                 parts.append(f"  <chunk id='{ch_id}'><![CDATA[{ch_content}]]></chunk>")
+            chunks_written += 1
+            total_chars += len(ch_content)
 
         parts.append("</document_content>")
         parts.append("</document>")
         parts.append("")
+        docs_written += 1
 
     return "\n".join(parts).strip()
 
@@ -664,7 +686,10 @@ async def search_knowledge_base_async(
         seen_hashes.add(content_hash)
         deduplicated.append(doc)
 
-    return format_documents_for_context(deduplicated)
+    # Keep the number of documents bounded across connector fan-out.
+    capped = deduplicated[: max(1, top_k)]
+
+    return format_documents_for_context(capped)
 
 
 def _build_connector_docstring(available_connectors: list[str] | None) -> str:

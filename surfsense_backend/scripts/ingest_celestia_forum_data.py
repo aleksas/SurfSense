@@ -118,11 +118,12 @@ async def ingest(
         user = (await session.execute(select(User).where(User.email == email))).scalars().first()
         if not user:
             raise RuntimeError(f"User not found: {email}")
+        user_id = str(user.id)
 
-        ss_id = await _resolve_search_space_id(session, str(user.id), search_space_id)
+        ss_id = await _resolve_search_space_id(session, user_id, search_space_id)
         task_logger = TaskLoggingService(session, ss_id)
 
-        print(f"User: {email} (id={user.id})")
+        print(f"User: {email} (id={user_id})")
         print(f"Search space: {ss_id}")
         print(f"Folder: {folder}")
         print(f"Files: {len(files)}")
@@ -181,7 +182,7 @@ async def ingest(
                     embedding=None,
                     status=DocumentStatus.pending(),
                     updated_at=get_current_timestamp(),
-                    created_by_id=str(user.id),
+                    created_by_id=user_id,
                 )
                 session.add(document)
                 await session.commit()
@@ -203,7 +204,7 @@ async def ingest(
                     file_path=str(tmp_path),
                     filename=filename,
                     search_space_id=ss_id,
-                    user_id=str(user.id),
+                    user_id=user_id,
                     session=session,
                     task_logger=task_logger,
                     log_entry=log_entry,

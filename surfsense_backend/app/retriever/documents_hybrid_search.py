@@ -10,6 +10,8 @@ class DocumentHybridSearchRetriever:
             db_session: SQLAlchemy AsyncSession from FastAPI dependency injection
         """
         self.db_session = db_session
+        # Prevent huge context payloads from extremely large documents.
+        self.max_chunks_per_document = 60
 
     async def vector_search(
         self,
@@ -254,11 +256,24 @@ class DocumentHybridSearchRetriever:
         # Collect document IDs for chunk fetching
         doc_ids: list[int] = [doc.id for doc, _score in documents_with_scores]
 
-        # Fetch ALL chunks for these documents in a single query
+        # Fetch a bounded number of chunks per document so large docs do not
+        # dominate latency and prompt size.
+        ranked_chunks = (
+            select(
+                Chunk.id.label("chunk_id"),
+                Chunk.document_id.label("document_id"),
+                func.row_number()
+                .over(partition_by=Chunk.document_id, order_by=Chunk.id)
+                .label("rn"),
+            )
+            .where(Chunk.document_id.in_(doc_ids))
+            .subquery()
+        )
         chunks_query = (
             select(Chunk)
             .options(joinedload(Chunk.document))
-            .where(Chunk.document_id.in_(doc_ids))
+            .join(ranked_chunks, Chunk.id == ranked_chunks.c.chunk_id)
+            .where(ranked_chunks.c.rn <= self.max_chunks_per_document)
             .order_by(Chunk.document_id, Chunk.id)
         )
         chunks_result = await self.db_session.execute(chunks_query)

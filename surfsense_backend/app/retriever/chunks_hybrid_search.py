@@ -10,6 +10,8 @@ class ChucksHybridSearchRetriever:
             db_session: SQLAlchemy AsyncSession from FastAPI dependency injection
         """
         self.db_session = db_session
+        # Prevent huge context payloads from very large documents.
+        self.max_chunks_per_document = 60
 
     async def vector_search(
         self,
@@ -300,20 +302,11 @@ class ChucksHybridSearchRetriever:
         if not doc_ids:
             return []
 
-        # Fetch ALL chunks for selected documents in a single query so the final prompt can cite
-        # any chunk from those documents.
-        chunk_query = (
-            select(Chunk)
-            .options(joinedload(Chunk.document))
-            .join(Document, Chunk.document_id == Document.id)
-            .where(Document.id.in_(doc_ids))
-            .where(*base_conditions)
-            .order_by(Chunk.document_id, Chunk.id)
-        )
-        chunks_result = await self.db_session.execute(chunk_query)
-        all_chunks = chunks_result.scalars().all()
-
-        # Assemble final doc-grouped results in the same order as doc_ids
+        # Assemble final doc-grouped results in the same order as doc_ids.
+        # IMPORTANT:
+        # Keep the highest-scoring chunks from the hybrid result order (relevance-first),
+        # instead of reloading chunks by chunk_id order, which biases toward document starts
+        # and can hide the actual query-matching snippets.
         doc_map: dict[int, dict] = {
             doc_id: {
                 "document_id": doc_id,
@@ -326,24 +319,37 @@ class ChucksHybridSearchRetriever:
             for doc_id in doc_ids
         }
 
-        for chunk in all_chunks:
-            doc = chunk.document
-            doc_id = doc.id
+        per_doc_seen_chunk_ids: dict[int, set[int]] = {doc_id: set() for doc_id in doc_ids}
+
+        for item in serialized_chunk_results:
+            doc_info = item.get("document", {}) or {}
+            doc_id = doc_info.get("id")
             if doc_id not in doc_map:
                 continue
+
+            chunk_id = item.get("chunk_id")
+            if chunk_id is None:
+                continue
+
             doc_entry = doc_map[doc_id]
-            doc_entry["document"] = {
-                "id": doc.id,
-                "title": doc.title,
-                "document_type": doc.document_type.value
-                if getattr(doc, "document_type", None)
-                else None,
-                "metadata": doc.document_metadata or {},
-            }
-            doc_entry["source"] = (
-                doc.document_type.value if getattr(doc, "document_type", None) else None
+            if len(doc_entry["chunks"]) >= self.max_chunks_per_document:
+                continue
+            if chunk_id in per_doc_seen_chunk_ids[doc_id]:
+                continue
+
+            per_doc_seen_chunk_ids[doc_id].add(chunk_id)
+            doc_entry["chunks"].append(
+                {"chunk_id": chunk_id, "content": item.get("content", "")}
             )
-            doc_entry["chunks"].append({"chunk_id": chunk.id, "content": chunk.content})
+
+            if not doc_entry["document"]:
+                doc_entry["document"] = {
+                    "id": doc_id,
+                    "title": doc_info.get("title"),
+                    "document_type": doc_info.get("document_type"),
+                    "metadata": doc_info.get("metadata") or {},
+                }
+                doc_entry["source"] = doc_info.get("document_type")
 
         # Fill concatenated content (useful for reranking)
         final_docs: list[dict] = []
