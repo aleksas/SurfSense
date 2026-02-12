@@ -1,5 +1,6 @@
 "use client";
 
+import { useQuery } from "@tanstack/react-query";
 import { useAtomValue } from "jotai";
 import { AlertTriangle, Cable, Settings } from "lucide-react";
 import Link from "next/link";
@@ -19,8 +20,9 @@ import { Spinner } from "@/components/ui/spinner";
 import { Tabs, TabsContent } from "@/components/ui/tabs";
 import type { SearchSourceConnector } from "@/contracts/types/connector.types";
 import { useConnectorsElectric } from "@/hooks/use-connectors-electric";
-import { useDocuments } from "@/hooks/use-documents";
 import { useInbox } from "@/hooks/use-inbox";
+import { documentsApiService } from "@/lib/apis/documents-api.service";
+import { cacheKeys } from "@/lib/query-client/cache-keys";
 import { cn } from "@/lib/utils";
 import { ConnectorDialogHeader } from "./connector-popup/components/connector-dialog-header";
 import { ConnectorConnectView } from "./connector-popup/connector-configs/views/connector-connect-view";
@@ -63,9 +65,19 @@ export const ConnectorIndicator: FC<{ hideTrigger?: boolean }> = ({ hideTrigger 
 	const llmConfigLoading = preferencesLoading || globalConfigsLoading;
 
 	// Fetch document type counts using Electric SQL + PGlite for real-time updates
-	const { typeCounts: documentTypeCounts, loading: documentTypesLoading } = useDocuments(
-		searchSpaceId ? Number(searchSpaceId) : null
-	);
+	// NOTE: avoid Electric here; syncing ~10k+ docs makes the whole UI sluggish.
+	const {
+		data: documentTypeCounts = {},
+		isLoading: documentTypesLoading,
+	} = useQuery({
+		queryKey: cacheKeys.documents.typeCounts(searchSpaceId ? String(searchSpaceId) : undefined),
+		queryFn: () =>
+			documentsApiService.getDocumentTypeCounts({
+				queryParams: { search_space_id: searchSpaceId ? Number(searchSpaceId) : undefined },
+			}),
+		enabled: !!searchSpaceId,
+		staleTime: 30 * 1000,
+	});
 
 	// Fetch notifications to detect indexing failures
 	const { inboxItems = [] } = useInbox(

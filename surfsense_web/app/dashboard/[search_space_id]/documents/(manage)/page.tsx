@@ -9,13 +9,12 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
 import { deleteDocumentMutationAtom } from "@/atoms/documents/document-mutation.atoms";
 import type { DocumentTypeEnum } from "@/contracts/types/document.types";
-import { useDocuments } from "@/hooks/use-documents";
 import { documentsApiService } from "@/lib/apis/documents-api.service";
 import { cacheKeys } from "@/lib/query-client/cache-keys";
 import { DocumentsFilters } from "./components/DocumentsFilters";
 import { DocumentsTableShell, type SortKey } from "./components/DocumentsTableShell";
 import { PAGE_SIZE, PaginationControls } from "./components/PaginationControls";
-import type { ColumnVisibility } from "./components/types";
+import type { ColumnVisibility, Document } from "./components/types";
 
 function useDebounced<T>(value: T, delay = 250) {
 	const [debounced, setDebounced] = useState(value);
@@ -46,18 +45,40 @@ export default function DocumentsTable() {
 	const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
 	const { mutateAsync: deleteDocumentMutation } = useAtomValue(deleteDocumentMutationAtom);
 
-	// REAL-TIME: Use Electric SQL hook for live document updates (when not searching)
-	const {
-		documents: realtimeDocuments,
-		typeCounts: realtimeTypeCounts,
-		loading: realtimeLoading,
-		error: realtimeError,
-	} = useDocuments(searchSpaceId, activeTypes);
-
-	// Check if we're in search mode
 	const isSearchMode = !!debouncedSearch.trim();
 
-	// Build search query parameters (only used when searching)
+	const { data: typeCounts = {}, isLoading: typeCountsLoading } = useQuery({
+		queryKey: cacheKeys.documents.typeCounts(String(searchSpaceId)),
+		queryFn: () =>
+			documentsApiService.getDocumentTypeCounts({
+				queryParams: { search_space_id: searchSpaceId },
+			}),
+		staleTime: 30 * 1000,
+		enabled: !!searchSpaceId,
+	});
+
+	const listQueryParams = useMemo(
+		() => ({
+			search_space_id: searchSpaceId,
+			page: pageIndex,
+			page_size: PAGE_SIZE,
+			...(activeTypes.length > 0 && { document_types: activeTypes }),
+		}),
+		[searchSpaceId, pageIndex, activeTypes]
+	);
+
+	const {
+		data: listResponse,
+		isLoading: isListLoading,
+		refetch: refetchList,
+		error: listError,
+	} = useQuery({
+		queryKey: cacheKeys.documents.globalQueryParams(listQueryParams),
+		queryFn: () => documentsApiService.getDocuments({ queryParams: listQueryParams }),
+		staleTime: 30 * 1000,
+		enabled: !!searchSpaceId && !isSearchMode,
+	});
+
 	const searchQueryParams = useMemo(
 		() => ({
 			search_space_id: searchSpaceId,
@@ -69,7 +90,6 @@ export default function DocumentsTable() {
 		[searchSpaceId, pageIndex, activeTypes, debouncedSearch]
 	);
 
-	// API search query (only enabled when searching - Electric doesn't do full-text search)
 	const {
 		data: searchResponse,
 		isLoading: isSearchLoading,
@@ -78,66 +98,48 @@ export default function DocumentsTable() {
 	} = useQuery({
 		queryKey: cacheKeys.documents.globalQueryParams(searchQueryParams),
 		queryFn: () => documentsApiService.searchDocuments({ queryParams: searchQueryParams }),
-		staleTime: 30 * 1000, // 30 seconds for search (shorter since it's on-demand)
+		staleTime: 30 * 1000,
 		enabled: !!searchSpaceId && isSearchMode,
 	});
 
-	// Client-side sorting for real-time documents
-	const sortedRealtimeDocuments = useMemo(() => {
-		const docs = [...realtimeDocuments];
-		docs.sort((a, b) => {
-			const av = a[sortKey] ?? "";
-			const bv = b[sortKey] ?? "";
-			let cmp: number;
-			if (sortKey === "created_at") {
-				cmp = new Date(av as string).getTime() - new Date(bv as string).getTime();
-			} else {
-				cmp = String(av).localeCompare(String(bv));
-			}
-			return sortDesc ? -cmp : cmp;
-		});
-		return docs;
-	}, [realtimeDocuments, sortKey, sortDesc]);
+	const { documents, total, loading, error } = useMemo(() => {
+		const response = isSearchMode ? searchResponse : listResponse;
+		const items = response?.items || [];
+		const docs: Document[] = items.map((item) => ({
+			id: item.id,
+			title: item.title,
+			document_type: item.document_type,
+			document_metadata: item.document_metadata,
+			content: item.content,
+			created_at: item.created_at,
+			search_space_id: item.search_space_id,
+			created_by_id: item.created_by_id ?? null,
+			created_by_name: item.created_by_name ?? null,
+			status: (item as { status?: Document["status"] }).status,
+		}));
 
-	// Client-side pagination for real-time documents
-	const paginatedRealtimeDocuments = useMemo(() => {
-		const start = pageIndex * PAGE_SIZE;
-		const end = start + PAGE_SIZE;
-		return sortedRealtimeDocuments.slice(start, end);
-	}, [sortedRealtimeDocuments, pageIndex]);
+		return {
+			documents: docs,
+			total: response?.total || 0,
+			loading: isSearchMode ? isSearchLoading : isListLoading,
+			error: isSearchMode ? searchError : listError,
+		};
+	}, [
+		isSearchMode,
+		searchResponse,
+		listResponse,
+		isSearchLoading,
+		isListLoading,
+		searchError,
+		listError,
+	]);
 
-	// Determine what to display based on search mode
-	const displayDocs = isSearchMode
-		? (searchResponse?.items || []).map((item) => ({
-				id: item.id,
-				search_space_id: item.search_space_id,
-				document_type: item.document_type,
-				title: item.title,
-				created_by_id: item.created_by_id ?? null,
-				created_by_name: item.created_by_name ?? null,
-				created_at: item.created_at,
-				status: (
-					item as {
-						status?: { state: "ready" | "pending" | "processing" | "failed"; reason?: string };
-					}
-				).status ?? { state: "ready" as const },
-			}))
-		: paginatedRealtimeDocuments;
-
-	const displayTotal = isSearchMode ? searchResponse?.total || 0 : sortedRealtimeDocuments.length;
-
-	const loading = isSearchMode ? isSearchLoading : realtimeLoading;
-	const error = isSearchMode ? searchError : realtimeError;
-
-	const pageEnd = Math.min((pageIndex + 1) * PAGE_SIZE, displayTotal);
+	const pageEnd = Math.min((pageIndex + 1) * PAGE_SIZE, total);
 
 	const onToggleType = (type: DocumentTypeEnum, checked: boolean) => {
 		setActiveTypes((prev) => {
-			if (checked) {
-				return prev.includes(type) ? prev : [...prev, type];
-			} else {
-				return prev.filter((t) => t !== type);
-			}
+			if (checked) return prev.includes(type) ? prev : [...prev, type];
+			return prev.filter((t) => t !== type);
 		});
 		setPageIndex(0);
 	};
@@ -148,17 +150,7 @@ export default function DocumentsTable() {
 			return;
 		}
 
-		// Filter out pending/processing documents - they cannot be deleted
-		// For real-time mode, use sortedRealtimeDocuments (which has status)
-		// For search mode, use searchResponse items (need to safely access status)
-		const allDocs = isSearchMode
-			? (searchResponse?.items || []).map((item) => ({
-					id: item.id,
-					status: (item as { status?: { state: string } }).status,
-				}))
-			: sortedRealtimeDocuments.map((doc) => ({ id: doc.id, status: doc.status }));
-
-		const selectedDocs = allDocs.filter((doc) => selectedIds.has(doc.id));
+		const selectedDocs = documents.filter((doc) => selectedIds.has(doc.id));
 		const deletableIds = selectedDocs
 			.filter((doc) => doc.status?.state !== "pending" && doc.status?.state !== "processing")
 			.map((doc) => doc.id);
@@ -169,43 +161,33 @@ export default function DocumentsTable() {
 				`${inProgressCount} document(s) are pending or processing and cannot be deleted.`
 			);
 		}
-
-		if (deletableIds.length === 0) {
-			return;
-		}
+		if (deletableIds.length === 0) return;
 
 		try {
-			// Delete documents one by one using the mutation
-			// Track 409 conflicts separately (document started processing after UI loaded)
 			let conflictCount = 0;
 			const results = await Promise.all(
 				deletableIds.map(async (id) => {
 					try {
 						await deleteDocumentMutation({ id });
 						return true;
-					} catch (error: unknown) {
+					} catch (err: unknown) {
 						const status =
-							(error as { response?: { status?: number } })?.response?.status ??
-							(error as { status?: number })?.status;
+							(err as { response?: { status?: number } })?.response?.status ??
+							(err as { status?: number })?.status;
 						if (status === 409) conflictCount++;
 						return false;
 					}
 				})
 			);
-			const okCount = results.filter((r) => r === true).length;
-			if (okCount === deletableIds.length) {
-				toast.success(t("delete_success_count", { count: okCount }));
-			} else if (conflictCount > 0) {
-				toast.error(`${conflictCount} document(s) started processing. Please try again later.`);
-			} else {
-				toast.error(t("delete_partial_failed"));
-			}
 
-			// If in search mode, refetch search results to reflect deletion
-			if (isSearchMode) {
-				await refetchSearch();
-			}
-			// Real-time mode: Electric will sync the deletion automatically
+			const okCount = results.filter(Boolean).length;
+			if (okCount === deletableIds.length) toast.success(t("delete_success_count", { count: okCount }));
+			else if (conflictCount > 0)
+				toast.error(`${conflictCount} document(s) started processing. Please try again later.`);
+			else toast.error(t("delete_partial_failed"));
+
+			if (isSearchMode) await refetchSearch();
+			else await refetchList();
 
 			setSelectedIds(new Set());
 		} catch (e) {
@@ -214,24 +196,20 @@ export default function DocumentsTable() {
 		}
 	};
 
-	// Single document delete handler for RowActions
 	const handleDeleteDocument = useCallback(
 		async (id: number): Promise<boolean> => {
 			try {
 				await deleteDocumentMutation({ id });
 				toast.success(t("delete_success") || "Document deleted");
-				// If in search mode, refetch search results to reflect deletion
-				if (isSearchMode) {
-					await refetchSearch();
-				}
-				// Real-time mode: Electric will sync the deletion automatically
+				if (isSearchMode) await refetchSearch();
+				else await refetchList();
 				return true;
 			} catch (e) {
 				console.error("Error deleting document:", e);
 				return false;
 			}
 		},
-		[deleteDocumentMutation, isSearchMode, refetchSearch, t]
+		[deleteDocumentMutation, isSearchMode, refetchSearch, refetchList, t]
 	);
 
 	const handleSortChange = useCallback((key: SortKey) => {
@@ -245,11 +223,17 @@ export default function DocumentsTable() {
 		});
 	}, []);
 
-	// Reset page when search changes (type filter already resets via onToggleType)
-	// biome-ignore lint/correctness/useExhaustiveDependencies: Intentionally reset page on search change
+	// Reset page + selection when search changes.
+	// biome-ignore lint/correctness/useExhaustiveDependencies: intended
 	useEffect(() => {
 		setPageIndex(0);
+		setSelectedIds(new Set());
 	}, [debouncedSearch]);
+
+	// Keep selection scoped to visible docs.
+	useEffect(() => {
+		setSelectedIds(new Set());
+	}, [pageIndex, activeTypes, isSearchMode]);
 
 	useEffect(() => {
 		const mq = window.matchMedia("(max-width: 768px)");
@@ -269,9 +253,8 @@ export default function DocumentsTable() {
 			transition={{ duration: 0.3 }}
 			className="w-full max-w-7xl mx-auto px-6 pt-17 pb-6 space-y-6 min-h-[calc(100vh-64px)]"
 		>
-			{/* Filters - use real-time type counts */}
 			<DocumentsFilters
-				typeCounts={realtimeTypeCounts}
+				typeCounts={typeCounts as Partial<Record<DocumentTypeEnum, number>>}
 				selectedIds={selectedIds}
 				onSearch={setSearch}
 				searchValue={search}
@@ -280,10 +263,9 @@ export default function DocumentsTable() {
 				activeTypes={activeTypes}
 			/>
 
-			{/* Table */}
 			<DocumentsTableShell
-				documents={displayDocs}
-				loading={!!loading}
+				documents={documents}
+				loading={!!loading || typeCountsLoading}
 				error={!!error}
 				selectedIds={selectedIds}
 				setSelectedIds={setSelectedIds}
@@ -295,19 +277,19 @@ export default function DocumentsTable() {
 				searchSpaceId={String(searchSpaceId)}
 			/>
 
-			{/* Pagination */}
 			<PaginationControls
 				pageIndex={pageIndex}
-				total={displayTotal}
+				total={total}
 				onFirst={() => setPageIndex(0)}
 				onPrev={() => setPageIndex((i) => Math.max(0, i - 1))}
-				onNext={() => setPageIndex((i) => (pageEnd < displayTotal ? i + 1 : i))}
-				onLast={() => setPageIndex(Math.max(0, Math.ceil(displayTotal / PAGE_SIZE) - 1))}
+				onNext={() => setPageIndex((i) => (pageEnd < total ? i + 1 : i))}
+				onLast={() => setPageIndex(Math.max(0, Math.ceil(total / PAGE_SIZE) - 1))}
 				canPrev={pageIndex > 0}
-				canNext={pageEnd < displayTotal}
+				canNext={pageEnd < total}
 			/>
 		</motion.div>
 	);
 }
 
 export { DocumentsTable };
+
