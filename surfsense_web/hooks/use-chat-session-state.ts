@@ -6,7 +6,9 @@ import { useEffect } from "react";
 import { chatSessionStateAtom } from "@/atoms/chat/chat-session-state.atom";
 import type { ChatSessionState } from "@/contracts/types/chat-session-state.types";
 
-const ELECTRIC_URL = process.env.NEXT_PUBLIC_ELECTRIC_URL || "http://localhost:5133";
+// Always use same-origin for the browser. Next.js rewrites proxy /electric to
+// the Electric container so tunnels work.
+const ELECTRIC_URL = typeof window !== "undefined" ? `${window.location.origin}/electric` : "";
 
 /**
  * Syncs chat session state for a thread via Electric SQL.

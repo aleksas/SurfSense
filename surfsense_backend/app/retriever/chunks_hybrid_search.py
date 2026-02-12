@@ -102,9 +102,12 @@ class ChucksHybridSearchRetriever:
 
         # Full-text search should work across mixed languages and quoted phrases.
         # - "simple" avoids English-only stemming/stopwords (important for forum data).
+        # - Include the document title to make filename/title lookups work (PDFs, docs).
         # - If the user includes a long quoted phrase, prefer phrase search.
         quoted = _extract_longest_quoted_phrase(query_text)
-        tsvector = func.to_tsvector("simple", Chunk.content)
+        tsvector = func.to_tsvector("simple", Chunk.content).op("||")(
+            func.to_tsvector("simple", Document.title)
+        )
         tsquery = (
             func.phraseto_tsquery("simple", quoted)
             if quoted
@@ -184,7 +187,10 @@ class ChucksHybridSearchRetriever:
         n_results = top_k * 5  # Fetch extra chunks for better document-level fusion
 
         # Full-text search should work across mixed languages and quoted phrases.
-        tsvector = func.to_tsvector("simple", Chunk.content)
+        # Include document title for better filename/title recall.
+        tsvector = func.to_tsvector("simple", Chunk.content).op("||")(
+            func.to_tsvector("simple", Document.title)
+        )
         tsquery = (
             func.phraseto_tsquery("simple", quoted)
             if quoted
@@ -250,24 +256,12 @@ class ChucksHybridSearchRetriever:
             .cte("keyword_search")
         )
 
-        # If the user provides a long quoted phrase, they likely want an exact lookup.
-        # RRF can tie semantic vs keyword ranks and lose the exact match. In that case,
-        # prefer keyword ranking directly.
-        if quoted:
-            final_query = (
-                select(
-                    Chunk,
-                    func.ts_rank_cd(tsvector, tsquery).label("score"),
-                )
-                .join(Document, Chunk.document_id == Document.id)
-                .where(*base_conditions)
-                .where(tsvector.op("@@")(tsquery))
-                .options(joinedload(Chunk.document))
-                .order_by(func.ts_rank_cd(tsvector, tsquery).desc())
-                .limit(n_results)
-            )
-        else:
-            # Final combined query using a FULL OUTER JOIN with RRF scoring
+        # Prefer phrase/keyword ranking for long quoted phrases, but DO NOT return
+        # an empty set if the phrase doesn't match due to encoding/normalization
+        # differences in the corpus (common in scraped forum data). In that case,
+        # fall back to hybrid (semantic + keyword) so the user still gets results.
+
+        async def _exec_hybrid() -> list:
             final_query = (
                 select(
                     Chunk,
@@ -290,12 +284,30 @@ class ChucksHybridSearchRetriever:
                 )
                 .options(joinedload(Chunk.document))
                 .order_by(text("score DESC"))
-                .limit(top_k)
+                .limit(n_results)
             )
+            result = await self.db_session.execute(final_query)
+            return result.all()
 
-        # Execute the query
-        result = await self.db_session.execute(final_query)
-        chunks_with_scores = result.all()
+        if quoted:
+            keyword_only_query = (
+                select(
+                    Chunk,
+                    func.ts_rank_cd(tsvector, tsquery).label("score"),
+                )
+                .join(Document, Chunk.document_id == Document.id)
+                .where(*base_conditions)
+                .where(tsvector.op("@@")(tsquery))
+                .options(joinedload(Chunk.document))
+                .order_by(func.ts_rank_cd(tsvector, tsquery).desc())
+                .limit(n_results)
+            )
+            result = await self.db_session.execute(keyword_only_query)
+            chunks_with_scores = result.all()
+            if not chunks_with_scores:
+                chunks_with_scores = await _exec_hybrid()
+        else:
+            chunks_with_scores = await _exec_hybrid()
 
         # If no results were found, return an empty list
         if not chunks_with_scores:

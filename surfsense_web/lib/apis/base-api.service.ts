@@ -1,5 +1,6 @@
 import type { ZodType } from "zod";
 import { getBearerToken, handleUnauthorized, refreshAccessToken } from "../auth-utils";
+import { BACKEND_URL } from "../env-config";
 import { AppError, AuthenticationError, AuthorizationError, NotFoundError } from "../error";
 
 enum ResponseType {
@@ -339,4 +340,4 @@ class BaseApiService {
 	}
 }
 
-export const baseApiService = new BaseApiService(process.env.NEXT_PUBLIC_FASTAPI_BACKEND_URL || "");
+export const baseApiService = new BaseApiService(BACKEND_URL);

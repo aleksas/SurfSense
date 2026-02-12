@@ -180,8 +180,11 @@ export interface RegenerateParams {
  * Get the URL for the regenerate endpoint (for streaming fetch)
  */
 export function getRegenerateUrl(threadId: number): string {
-	const backendUrl = process.env.NEXT_PUBLIC_FASTAPI_BACKEND_URL || "http://localhost:8000";
-	return `${backendUrl}/api/v1/threads/${threadId}/regenerate`;
+	// Prefer centralized backend URL (supports same-origin proxy for tunnels).
+	// Import is intentionally dynamic here to keep module init light.
+	// eslint-disable-next-line @typescript-eslint/no-var-requires
+	const { BACKEND_URL } = require("@/lib/env-config");
+	return `${BACKEND_URL}/api/v1/threads/${threadId}/regenerate`;
 }
 
 // =============================================================================

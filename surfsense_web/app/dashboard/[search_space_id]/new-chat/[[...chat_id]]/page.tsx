@@ -672,7 +672,7 @@ export default function NewChatPage() {
 			]);
 
 			try {
-				const backendUrl = process.env.NEXT_PUBLIC_FASTAPI_BACKEND_URL || "http://localhost:8000";
+				const { BACKEND_URL: backendUrl } = await import("@/lib/env-config");
 
 				// Build message history for context
 				const messageHistory = messages

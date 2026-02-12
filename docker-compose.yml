@@ -37,6 +37,31 @@ services:
       - redis_data:/data
     command: redis-server --appendonly yes
 
+  ollama:
+    image: ollama/ollama:latest
+    # Enable NVIDIA GPU access (requires NVIDIA Container Toolkit on the host)
+    gpus: all
+    volumes:
+      - ollama_data:/root/.ollama
+    restart: unless-stopped
+
+  # Best-effort pre-pull of common local models so the UI can be used immediately.
+  # Comment this out if you prefer to pull models manually.
+  ollama_init:
+    image: curlimages/curl:latest
+    depends_on:
+      - ollama
+    entrypoint: ["/bin/sh", "-lc"]
+    command:
+      - |
+          set -e
+          until curl -sf http://ollama:11434/api/tags >/dev/null; do sleep 1; done
+          for m in llama3.1 gemma2:9b qwen2.5:7b mistral-small qwen3:8b qwen3:30b-a3b glm-4.7-flash:latest; do
+            echo "Pulling $$m"
+            curl -sS -X POST http://ollama:11434/api/pull -H 'Content-Type: application/json' -d "{\"name\":\"$$m\"}" >/dev/null
+          done
+    restart: "no"
+
   backend:
     build: ./surfsense_backend
     # image: ghcr.io/modsetter/surfsense_backend:latest
@@ -73,6 +98,7 @@ services:
     depends_on:
       - db
       - redis
+      - ollama
 
   # Run these services separately in production
   # celery_worker:
@@ -177,3 +203,4 @@ volumes:
   pgadmin_data:
   redis_data:
   shared_temp:
+  ollama_data:

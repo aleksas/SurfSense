@@ -237,22 +237,11 @@ class DocumentHybridSearchRetriever:
             .cte("keyword_search")
         )
 
-        # If the user provides a long quoted phrase, they likely want an exact lookup.
-        # Prefer keyword ranking directly to avoid RRF ties.
-        if quoted:
-            final_query = (
-                select(
-                    Document,
-                    func.ts_rank_cd(tsvector, tsquery).label("score"),
-                )
-                .where(*base_conditions)
-                .where(tsvector.op("@@")(tsquery))
-                .options(joinedload(Document.search_space))
-                .order_by(func.ts_rank_cd(tsvector, tsquery).desc())
-                .limit(top_k)
-            )
-        else:
-            # Final combined query using a FULL OUTER JOIN with RRF scoring
+        # Prefer phrase/keyword ranking for long quoted phrases, but if the phrase
+        # doesn't match (common with encoding/normalization differences), fall back
+        # to hybrid (semantic + keyword) rather than returning no results.
+
+        async def _exec_hybrid() -> list:
             final_query = (
                 select(
                     Document,
@@ -277,10 +266,27 @@ class DocumentHybridSearchRetriever:
                 .order_by(text("score DESC"))
                 .limit(top_k)
             )
+            result = await self.db_session.execute(final_query)
+            return result.all()
 
-        # Execute the query
-        result = await self.db_session.execute(final_query)
-        documents_with_scores = result.all()
+        if quoted:
+            keyword_only_query = (
+                select(
+                    Document,
+                    func.ts_rank_cd(tsvector, tsquery).label("score"),
+                )
+                .where(*base_conditions)
+                .where(tsvector.op("@@")(tsquery))
+                .options(joinedload(Document.search_space))
+                .order_by(func.ts_rank_cd(tsvector, tsquery).desc())
+                .limit(top_k)
+            )
+            result = await self.db_session.execute(keyword_only_query)
+            documents_with_scores = result.all()
+            if not documents_with_scores:
+                documents_with_scores = await _exec_hybrid()
+        else:
+            documents_with_scores = await _exec_hybrid()
 
         # If no results were found, return an empty list
         if not documents_with_scores:

@@ -82,9 +82,11 @@ const DB_PREFIX = "surfsense-";
 // Get Electric URL from environment
 function getElectricUrl(): string {
 	if (typeof window !== "undefined") {
-		return process.env.NEXT_PUBLIC_ELECTRIC_URL || "http://localhost:5133";
+		// Same-origin proxy path (Next.js rewrite) for tunnels/reverse-proxy setups.
+		return `${window.location.origin}/electric`;
 	}
-	return "http://localhost:5133";
+	// Docker-internal DNS for SSR/server-side usage (rare for Electric, but safe).
+	return "http://electric:3000";
 }
 
 /**

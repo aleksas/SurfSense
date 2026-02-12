@@ -35,7 +35,25 @@ const nextConfig: NextConfig = {
 	// PostHog reverse proxy configuration
 	// This helps bypass ad blockers by routing requests through your domain
 	async rewrites() {
+		// When exposing the frontend via a tunnel/reverse proxy, remote browsers cannot
+		// access backend/electric at their own localhost. Proxy those requests through
+		// Next.js so everything stays same-origin.
+		const backend = process.env.INTERNAL_FASTAPI_BACKEND_URL || "http://backend:8000";
+		const electric = process.env.INTERNAL_ELECTRIC_URL || "http://electric:3000";
+
 		return [
+			// Backend (FastAPI)
+			{ source: "/auth/:path*", destination: `${backend}/auth/:path*` },
+			{ source: "/users/:path*", destination: `${backend}/users/:path*` },
+			{ source: "/api/:path*", destination: `${backend}/api/:path*` },
+			// Avoid clobbering the frontend docs route at /docs
+			{ source: "/openapi.json", destination: `${backend}/openapi.json` },
+			{ source: "/redoc", destination: `${backend}/redoc` },
+
+			// ElectricSQL
+			{ source: "/electric/:path*", destination: `${electric}/:path*` },
+
+			// PostHog reverse proxy
 			{
 				source: "/ingest/static/:path*",
 				destination: "https://us-assets.i.posthog.com/static/:path*",

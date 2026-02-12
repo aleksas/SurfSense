@@ -76,7 +76,7 @@ async function processAttachment(file: File): Promise<ProcessAttachmentResponse>
 		throw new Error("Not authenticated");
 	}
 
-	const backendUrl = process.env.NEXT_PUBLIC_FASTAPI_BACKEND_URL || "http://localhost:8000";
+	const { BACKEND_URL: backendUrl } = await import("@/lib/env-config");
 
 	const formData = new FormData();
 	formData.append("file", file);

@@ -17,7 +17,23 @@ export const AUTH_TYPE = process.env.NEXT_PUBLIC_FASTAPI_BACKEND_AUTH_TYPE || "G
 
 // Backend API URL
 // Placeholder: __NEXT_PUBLIC_FASTAPI_BACKEND_URL__
-export const BACKEND_URL = process.env.NEXT_PUBLIC_FASTAPI_BACKEND_URL || "http://localhost:8000";
+function isLocalhostUrl(url: string): boolean {
+	// Treat common "local" defaults as "same-origin" for tunnels/reverse-proxy setups.
+	// This avoids remote clients trying to call their own localhost.
+	return /^(https?:\/\/)(localhost|127\.0\.0\.1)(:\d+)?\/?$/i.test(url);
+}
+
+const RAW_BACKEND_URL = process.env.NEXT_PUBLIC_FASTAPI_BACKEND_URL || "http://localhost:8000";
+
+// For tunnels/reverse-proxy setups, the browser must always use same-origin and
+// rely on Next.js rewrites to reach backend/electric. Otherwise remote clients
+// will try to call their own localhost or a LAN IP they can't reach.
+export const BACKEND_URL =
+	typeof window !== "undefined"
+		? window.location.origin
+		: isLocalhostUrl(RAW_BACKEND_URL)
+			? "http://backend:8000"
+			: RAW_BACKEND_URL;
 
 // ETL Service: "DOCLING" or "UNSTRUCTURED"
 // Placeholder: __NEXT_PUBLIC_ETL_SERVICE__
