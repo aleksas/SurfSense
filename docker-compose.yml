@@ -167,10 +167,10 @@ services:
 
   cloudflared:
     image: cloudflare/cloudflared:latest
-    command: tunnel --no-autoupdate --url http://host.docker.internal:3000
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
+    command: tunnel --no-autoupdate --url http://frontend:3000
     restart: unless-stopped
+    depends_on:
+      - frontend
 
 volumes:
   postgres_data:
