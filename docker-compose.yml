@@ -97,6 +97,14 @@ services:
       - NEXT_FRONTEND_URL=${NEXT_FRONTEND_URL:-http://localhost:3000}
       # Disable self-serve signups for this deployment (UI link is also hidden).
       - REGISTRATION_ENABLED=${REGISTRATION_ENABLED:-FALSE}
+      # Chat grounding: run a backend pre-search over FILE docs and return matches directly for
+      # lookup-style queries ("Find/Show/Quote/Which post"). This avoids local-model tool-calling
+      # failures and makes chat return exact ingested content.
+      - SURFSENSE_CHAT_PRESEARCH_ENABLED=${SURFSENSE_CHAT_PRESEARCH_ENABLED:-TRUE}
+      - SURFSENSE_CHAT_LOOKUP_BYPASS=${SURFSENSE_CHAT_LOOKUP_BYPASS:-TRUE}
+      - SURFSENSE_CHAT_PRESEARCH_TOP_K=${SURFSENSE_CHAT_PRESEARCH_TOP_K:-8}
+      - SURFSENSE_CHAT_PRESEARCH_MAX_DOCS=${SURFSENSE_CHAT_PRESEARCH_MAX_DOCS:-3}
+      - SURFSENSE_CHAT_PRESEARCH_MAX_CHARS=${SURFSENSE_CHAT_PRESEARCH_MAX_CHARS:-24000}
     depends_on:
       - db
       - redis

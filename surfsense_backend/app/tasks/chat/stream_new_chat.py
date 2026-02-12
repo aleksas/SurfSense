@@ -10,6 +10,7 @@ Supports loading LLM configurations from:
 """
 
 import json
+import os
 import re
 from collections.abc import AsyncGenerator
 from uuid import UUID
@@ -190,6 +191,88 @@ def _has_image_intent(user_query: str) -> bool:
     if not query:
         return False
     return any(keyword in query for keyword in _IMAGE_INTENT_KEYWORDS)
+
+
+def _is_lookup_query(user_query: str) -> bool:
+    """
+    Heuristic: queries that primarily want verbatim matches (posts/snippets) rather than synthesis.
+
+    This is used to short-circuit LLM generation when users want grounded retrieval output.
+    """
+    q = (user_query or "").strip().lower()
+    if not q:
+        return False
+
+    if re.match(r"^(find|show|quote|return|locate|search for)\\b", q):
+        return True
+
+    # Common phrasing patterns in this repo's Celestia forum usage.
+    if "forum post" in q and any(k in q for k in ("find", "return", "show", "quote")):
+        return True
+    if "which post" in q or "which thread" in q:
+        return True
+
+    return False
+
+
+def _wants_full_post(user_query: str) -> bool:
+    q = (user_query or "").strip().lower()
+    return any(k in q for k in ("whole post", "full post", "entire post", "provide the whole post"))
+
+
+def _format_retrieved_docs_for_user(
+    docs: list[dict],
+    *,
+    max_docs: int = 3,
+    max_chunks_per_doc: int = 3,
+    max_chars: int = 24_000,
+) -> str:
+    """
+    Render doc-grouped hybrid search results into a user-friendly, verbatim-ish block.
+
+    `docs` is the doc-grouped output from ConnectorService.search_files/search_crawled_urls.
+    """
+    if not docs:
+        return ""
+
+    total = 0
+    out: list[str] = []
+
+    for doc_idx, doc in enumerate(docs, start=1):
+        if doc_idx > max_docs or total >= max_chars:
+            break
+
+        doc_info = doc.get("document", {}) or {}
+        title = (doc_info.get("title") or "Untitled Document").strip()
+        doc_id = doc.get("document_id") or doc_info.get("id")
+
+        out.append(f"## Match {doc_idx}: {title}")
+        if doc_id is not None:
+            out.append(f"- document_id: {doc_id}")
+
+        chunks = doc.get("chunks", []) or []
+        chunks_written = 0
+        for ch in chunks:
+            if chunks_written >= max_chunks_per_doc or total >= max_chars:
+                break
+
+            chunk_id = ch.get("chunk_id")
+            content = (ch.get("content") or "").strip()
+            if not content:
+                continue
+
+            header = f"### Chunk {chunk_id}" if chunk_id is not None else "### Chunk"
+            block = "\n".join([header, "```text", content, "```"])
+            if total + len(block) > max_chars:
+                break
+
+            out.append(block)
+            total += len(block)
+            chunks_written += 1
+
+        out.append("")
+
+    return "\n".join(out).strip()
 
 
 def format_attachments_as_context(attachments: list[ChatAttachment]) -> str:
@@ -436,6 +519,44 @@ async def stream_new_chat(
         # Create connector service
         connector_service = ConnectorService(session, search_space_id=search_space_id)
 
+        # Optional pre-retrieval: make chat grounded even when local models don't tool-call reliably.
+        # This is especially important for "find/quote/show" forum/doc lookups.
+        presearch_enabled = (
+            os.getenv("SURFSENSE_CHAT_PRESEARCH_ENABLED", "TRUE").upper() == "TRUE"
+        )
+        presearch_top_k = int(os.getenv("SURFSENSE_CHAT_PRESEARCH_TOP_K", "8"))
+        presearch_max_docs = int(os.getenv("SURFSENSE_CHAT_PRESEARCH_MAX_DOCS", "3"))
+        presearch_max_chars = int(
+            os.getenv("SURFSENSE_CHAT_PRESEARCH_MAX_CHARS", "24000")
+        )
+        presearch_text: str = ""
+        bypass_lookup_queries = (
+            os.getenv("SURFSENSE_CHAT_LOOKUP_BYPASS", "TRUE").upper() == "TRUE"
+        )
+        should_bypass_agent = False
+
+        if presearch_enabled and (user_query or "").strip():
+            try:
+                # Celestia forum/docs are ingested as FILE docs in this repo.
+                _src, file_docs = await connector_service.search_files(
+                    user_query=user_query,
+                    search_space_id=search_space_id,
+                    top_k=presearch_top_k,
+                )
+                if file_docs:
+                    full_post = _wants_full_post(user_query)
+                    presearch_text = _format_retrieved_docs_for_user(
+                        file_docs,
+                        max_docs=presearch_max_docs,
+                        max_chunks_per_doc=12 if full_post else 3,
+                        max_chars=60_000 if full_post else presearch_max_chars,
+                    )
+            except Exception:
+                presearch_text = ""
+
+        if bypass_lookup_queries and presearch_text and _is_lookup_query(user_query):
+            should_bypass_agent = True
+
         # Get Firecrawl API key from webcrawler connector if configured
         from app.db import SearchSourceConnectorType
 
@@ -535,6 +656,16 @@ async def stream_new_chat(
         # Format the user query with context (attachments + mentioned documents + surfsense docs)
         final_query = user_query
         context_parts = []
+
+        # Pre-retrieval context (verbatim-ish) for grounding.
+        if presearch_text and not should_bypass_agent:
+            context_parts.append(
+                "<retrieved_context>\n"
+                "Below are verbatim excerpts from indexed documents.\n"
+                "Use them as the primary source of truth.\n"
+                "</retrieved_context>\n"
+                f"{presearch_text}"
+            )
 
         if attachments:
             context_parts.append(format_attachments_as_context(attachments))
@@ -698,10 +829,35 @@ async def stream_new_chat(
             items=last_active_step_items,
         )
 
+        if should_bypass_agent:
+            # Lookup-only mode: return grounded chunks directly instead of relying on tool-calling.
+            completion_event = complete_current_step()
+            if completion_event:
+                yield completion_event
+
+            bypass_step_id = next_thinking_step_id()
+            yield streaming_service.format_thinking_step(
+                step_id=bypass_step_id,
+                title="Searching knowledge base",
+                status="completed",
+                items=["Returning exact matches from indexed content"],
+            )
+
+            current_text_id = streaming_service.generate_text_id()
+            yield streaming_service.format_text_start(current_text_id)
+            yield streaming_service.format_text_delta(current_text_id, presearch_text)
+            yield streaming_service.format_text_end(current_text_id)
+            current_text_id = None
+            accumulated_text = presearch_text
+            # Finish the step and message early. Title generation is best-effort and can
+            # be skipped for lookup-only replies; the main goal is grounded content.
+            yield streaming_service.format_finish_step()
+            yield streaming_service.format_finish()
+            yield streaming_service.format_done()
+            return
+
         # Stream the agent response with thread config for memory
-        async for event in agent.astream_events(
-            input_state, config=config, version="v2"
-        ):
+        async for event in agent.astream_events(input_state, config=config, version="v2"):
             event_type = event.get("event", "")
 
             # Handle chat model stream events (text streaming)
