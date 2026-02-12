@@ -11,6 +11,7 @@ managing prompt configurations.
 """
 
 from dataclasses import dataclass
+import os
 from pathlib import Path
 
 import yaml
@@ -364,6 +365,15 @@ def create_chat_litellm_from_config(llm_config: dict) -> ChatLiteLLM | None:
     if llm_config.get("litellm_params"):
         litellm_kwargs.update(llm_config["litellm_params"])
 
+    # Ollama models can take >30s to load into VRAM on first request. If the client
+    # times out early, Ollama aborts the load and the UI appears "stuck".
+    # Default to a higher timeout for Ollama unless explicitly configured.
+    provider = llm_config.get("provider", "").upper()
+    if provider == "OLLAMA" and "request_timeout" not in litellm_kwargs:
+        litellm_kwargs["request_timeout"] = float(
+            os.getenv("SURFSENSE_OLLAMA_REQUEST_TIMEOUT", "180")
+        )
+
     return ChatLiteLLM(**litellm_kwargs)
 
 
@@ -416,5 +426,14 @@ def create_chat_litellm_from_agent_config(
     # Add any additional litellm parameters
     if agent_config.litellm_params:
         litellm_kwargs.update(agent_config.litellm_params)
+
+    # Same rationale as above for DB-managed configs.
+    if (
+        agent_config.provider.upper() == "OLLAMA"
+        and "request_timeout" not in litellm_kwargs
+    ):
+        litellm_kwargs["request_timeout"] = float(
+            os.getenv("SURFSENSE_OLLAMA_REQUEST_TIMEOUT", "180")
+        )
 
     return ChatLiteLLM(**litellm_kwargs)
