@@ -25,6 +25,14 @@ function isLocalhostUrl(url: string): boolean {
 
 const RAW_BACKEND_URL = process.env.NEXT_PUBLIC_FASTAPI_BACKEND_URL || "http://localhost:8000";
 
+function parseBool(val: string | undefined, defaultValue: boolean): boolean {
+	if (val == null) return defaultValue;
+	const v = val.trim().toLowerCase();
+	if (["1", "true", "yes", "y", "on"].includes(v)) return true;
+	if (["0", "false", "no", "n", "off"].includes(v)) return false;
+	return defaultValue;
+}
+
 // For tunnels/reverse-proxy setups, the browser must always use same-origin and
 // rely on Next.js rewrites to reach backend/electric. Otherwise remote clients
 // will try to call their own localhost or a LAN IP they can't reach.
@@ -34,6 +42,9 @@ export const BACKEND_URL =
 		: isLocalhostUrl(RAW_BACKEND_URL)
 			? "http://backend:8000"
 			: RAW_BACKEND_URL;
+
+// Registration toggle (UI only; backend enforces its own REGISTRATION_ENABLED).
+export const REGISTRATION_ENABLED = parseBool(process.env.NEXT_PUBLIC_REGISTRATION_ENABLED, true);
 
 // ETL Service: "DOCLING" or "UNSTRUCTURED"
 // Placeholder: __NEXT_PUBLIC_ETL_SERVICE__

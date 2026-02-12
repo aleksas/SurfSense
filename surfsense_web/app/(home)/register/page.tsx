@@ -11,7 +11,7 @@ import { registerMutationAtom } from "@/atoms/auth/auth-mutation.atoms";
 import { Logo } from "@/components/Logo";
 import { Spinner } from "@/components/ui/spinner";
 import { getAuthErrorDetails, isNetworkError, shouldRetry } from "@/lib/auth-errors";
-import { AUTH_TYPE } from "@/lib/env-config";
+import { AUTH_TYPE, REGISTRATION_ENABLED } from "@/lib/env-config";
 import { AppError, ValidationError } from "@/lib/error";
 import {
 	trackRegistrationAttempt,
@@ -38,8 +38,8 @@ export default function RegisterPage() {
 
 	// Check authentication type and redirect if not LOCAL
 	useEffect(() => {
-		if (AUTH_TYPE !== "LOCAL") {
-			router.push("/login");
+		if (AUTH_TYPE !== "LOCAL" || !REGISTRATION_ENABLED) {
+			router.replace("/login");
 		}
 	}, [router]);
 

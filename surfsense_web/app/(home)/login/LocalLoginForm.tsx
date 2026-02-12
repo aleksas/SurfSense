@@ -10,7 +10,7 @@ import { toast } from "sonner";
 import { loginMutationAtom } from "@/atoms/auth/auth-mutation.atoms";
 import { Spinner } from "@/components/ui/spinner";
 import { getAuthErrorDetails, isNetworkError, shouldRetry } from "@/lib/auth-errors";
-import { AUTH_TYPE } from "@/lib/env-config";
+import { AUTH_TYPE, REGISTRATION_ENABLED } from "@/lib/env-config";
 import { ValidationError } from "@/lib/error";
 import { trackLoginAttempt, trackLoginFailure, trackLoginSuccess } from "@/lib/posthog/events";
 
@@ -252,7 +252,7 @@ export function LocalLoginForm() {
 				</button>
 			</form>
 
-			{authType === "LOCAL" && (
+			{authType === "LOCAL" && REGISTRATION_ENABLED && (
 				<div className="mt-4 text-center text-sm">
 					<p className="text-gray-600 dark:text-gray-400">
 						{t("dont_have_account")}{" "}
