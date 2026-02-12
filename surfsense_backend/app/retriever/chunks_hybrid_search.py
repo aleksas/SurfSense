@@ -1,4 +1,11 @@
 from datetime import datetime
+import re
+
+
+def _extract_longest_quoted_phrase(query_text: str, *, min_len: int = 20) -> str | None:
+    phrases = re.findall(r"\"([^\"]+)\"", query_text)
+    phrases = [p.strip() for p in phrases if len(p.strip()) >= min_len]
+    return max(phrases, key=len) if phrases else None
 
 
 class ChucksHybridSearchRetriever:
@@ -93,9 +100,16 @@ class ChucksHybridSearchRetriever:
 
         from app.db import Chunk, Document
 
-        # Create tsvector and tsquery for PostgreSQL full-text search
-        tsvector = func.to_tsvector("english", Chunk.content)
-        tsquery = func.plainto_tsquery("english", query_text)
+        # Full-text search should work across mixed languages and quoted phrases.
+        # - "simple" avoids English-only stemming/stopwords (important for forum data).
+        # - If the user includes a long quoted phrase, prefer phrase search.
+        quoted = _extract_longest_quoted_phrase(query_text)
+        tsvector = func.to_tsvector("simple", Chunk.content)
+        tsquery = (
+            func.phraseto_tsquery("simple", quoted)
+            if quoted
+            else func.websearch_to_tsquery("simple", query_text)
+        )
 
         # Build the query filtered by search space
         query = (
@@ -163,13 +177,19 @@ class ChucksHybridSearchRetriever:
         embedding_model = config.embedding_model_instance
         query_embedding = embedding_model.embed(query_text)
 
+        quoted = _extract_longest_quoted_phrase(query_text)
+
         # RRF constants
         k = 60
         n_results = top_k * 5  # Fetch extra chunks for better document-level fusion
 
-        # Create tsvector and tsquery for PostgreSQL full-text search
-        tsvector = func.to_tsvector("english", Chunk.content)
-        tsquery = func.plainto_tsquery("english", query_text)
+        # Full-text search should work across mixed languages and quoted phrases.
+        tsvector = func.to_tsvector("simple", Chunk.content)
+        tsquery = (
+            func.phraseto_tsquery("simple", quoted)
+            if quoted
+            else func.websearch_to_tsquery("simple", query_text)
+        )
 
         # Base conditions for chunk filtering - search space is required
         base_conditions = [Document.search_space_id == search_space_id]
@@ -230,31 +250,48 @@ class ChucksHybridSearchRetriever:
             .cte("keyword_search")
         )
 
-        # Final combined query using a FULL OUTER JOIN with RRF scoring
-        final_query = (
-            select(
-                Chunk,
-                (
-                    func.coalesce(1.0 / (k + semantic_search_cte.c.rank), 0.0)
-                    + func.coalesce(1.0 / (k + keyword_search_cte.c.rank), 0.0)
-                ).label("score"),
-            )
-            .select_from(
-                semantic_search_cte.outerjoin(
-                    keyword_search_cte,
-                    semantic_search_cte.c.id == keyword_search_cte.c.id,
-                    full=True,
+        # If the user provides a long quoted phrase, they likely want an exact lookup.
+        # RRF can tie semantic vs keyword ranks and lose the exact match. In that case,
+        # prefer keyword ranking directly.
+        if quoted:
+            final_query = (
+                select(
+                    Chunk,
+                    func.ts_rank_cd(tsvector, tsquery).label("score"),
                 )
+                .join(Document, Chunk.document_id == Document.id)
+                .where(*base_conditions)
+                .where(tsvector.op("@@")(tsquery))
+                .options(joinedload(Chunk.document))
+                .order_by(func.ts_rank_cd(tsvector, tsquery).desc())
+                .limit(n_results)
             )
-            .join(
-                Chunk,
-                Chunk.id
-                == func.coalesce(semantic_search_cte.c.id, keyword_search_cte.c.id),
+        else:
+            # Final combined query using a FULL OUTER JOIN with RRF scoring
+            final_query = (
+                select(
+                    Chunk,
+                    (
+                        func.coalesce(1.0 / (k + semantic_search_cte.c.rank), 0.0)
+                        + func.coalesce(1.0 / (k + keyword_search_cte.c.rank), 0.0)
+                    ).label("score"),
+                )
+                .select_from(
+                    semantic_search_cte.outerjoin(
+                        keyword_search_cte,
+                        semantic_search_cte.c.id == keyword_search_cte.c.id,
+                        full=True,
+                    )
+                )
+                .join(
+                    Chunk,
+                    Chunk.id
+                    == func.coalesce(semantic_search_cte.c.id, keyword_search_cte.c.id),
+                )
+                .options(joinedload(Chunk.document))
+                .order_by(text("score DESC"))
+                .limit(top_k)
             )
-            .options(joinedload(Chunk.document))
-            .order_by(text("score DESC"))
-            .limit(top_k)
-        )
 
         # Execute the query
         result = await self.db_session.execute(final_query)

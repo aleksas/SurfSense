@@ -4,7 +4,7 @@ Revision ID: 33
 Revises: 32
 
 Changes:
-1. Add pages_limit column (Integer, default 500)
+1. Add pages_limit column (Integer, default 999999999 = unlimited for OSS)
 2. Add pages_used column (Integer, default 0)
 """
 
@@ -40,7 +40,8 @@ def upgrade() -> None:
                 "pages_limit",
                 sa.Integer(),
                 nullable=False,
-                server_default="500",
+                # Unlimited by default in OSS. Can still be overridden at runtime via env/config.
+                server_default="999999999",
             ),
         )
 

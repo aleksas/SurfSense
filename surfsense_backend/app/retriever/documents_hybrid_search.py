@@ -1,4 +1,11 @@
 from datetime import datetime
+import re
+
+
+def _extract_longest_quoted_phrase(query_text: str, *, min_len: int = 20) -> str | None:
+    phrases = re.findall(r"\"([^\"]+)\"", query_text)
+    phrases = [p.strip() for p in phrases if len(p.strip()) >= min_len]
+    return max(phrases, key=len) if phrases else None
 
 
 class DocumentHybridSearchRetriever:
@@ -94,9 +101,14 @@ class DocumentHybridSearchRetriever:
 
         from app.db import Document
 
-        # Create tsvector and tsquery for PostgreSQL full-text search
-        tsvector = func.to_tsvector("english", Document.content)
-        tsquery = func.plainto_tsquery("english", query_text)
+        # Full-text search should work across mixed languages and quoted phrases.
+        quoted = _extract_longest_quoted_phrase(query_text)
+        tsvector = func.to_tsvector("simple", Document.content)
+        tsquery = (
+            func.phraseto_tsquery("simple", quoted)
+            if quoted
+            else func.websearch_to_tsquery("simple", query_text)
+        )
 
         # Build the query filtered by search space
         query = (
@@ -157,13 +169,19 @@ class DocumentHybridSearchRetriever:
         embedding_model = config.embedding_model_instance
         query_embedding = embedding_model.embed(query_text)
 
+        quoted = _extract_longest_quoted_phrase(query_text)
+
         # RRF constants
         k = 60
         n_results = top_k * 2  # Fetch extra documents for better fusion
 
-        # Create tsvector and tsquery for PostgreSQL full-text search
-        tsvector = func.to_tsvector("english", Document.content)
-        tsquery = func.plainto_tsquery("english", query_text)
+        # Full-text search should work across mixed languages and quoted phrases.
+        tsvector = func.to_tsvector("simple", Document.content)
+        tsquery = (
+            func.phraseto_tsquery("simple", quoted)
+            if quoted
+            else func.websearch_to_tsquery("simple", query_text)
+        )
 
         # Base conditions for document filtering - search space is required
         base_conditions = [Document.search_space_id == search_space_id]
@@ -219,31 +237,46 @@ class DocumentHybridSearchRetriever:
             .cte("keyword_search")
         )
 
-        # Final combined query using a FULL OUTER JOIN with RRF scoring
-        final_query = (
-            select(
-                Document,
-                (
-                    func.coalesce(1.0 / (k + semantic_search_cte.c.rank), 0.0)
-                    + func.coalesce(1.0 / (k + keyword_search_cte.c.rank), 0.0)
-                ).label("score"),
-            )
-            .select_from(
-                semantic_search_cte.outerjoin(
-                    keyword_search_cte,
-                    semantic_search_cte.c.id == keyword_search_cte.c.id,
-                    full=True,
+        # If the user provides a long quoted phrase, they likely want an exact lookup.
+        # Prefer keyword ranking directly to avoid RRF ties.
+        if quoted:
+            final_query = (
+                select(
+                    Document,
+                    func.ts_rank_cd(tsvector, tsquery).label("score"),
                 )
+                .where(*base_conditions)
+                .where(tsvector.op("@@")(tsquery))
+                .options(joinedload(Document.search_space))
+                .order_by(func.ts_rank_cd(tsvector, tsquery).desc())
+                .limit(top_k)
             )
-            .join(
-                Document,
-                Document.id
-                == func.coalesce(semantic_search_cte.c.id, keyword_search_cte.c.id),
+        else:
+            # Final combined query using a FULL OUTER JOIN with RRF scoring
+            final_query = (
+                select(
+                    Document,
+                    (
+                        func.coalesce(1.0 / (k + semantic_search_cte.c.rank), 0.0)
+                        + func.coalesce(1.0 / (k + keyword_search_cte.c.rank), 0.0)
+                    ).label("score"),
+                )
+                .select_from(
+                    semantic_search_cte.outerjoin(
+                        keyword_search_cte,
+                        semantic_search_cte.c.id == keyword_search_cte.c.id,
+                        full=True,
+                    )
+                )
+                .join(
+                    Document,
+                    Document.id
+                    == func.coalesce(semantic_search_cte.c.id, keyword_search_cte.c.id),
+                )
+                .options(joinedload(Document.search_space))
+                .order_by(text("score DESC"))
+                .limit(top_k)
             )
-            .options(joinedload(Document.search_space))
-            .order_by(text("score DESC"))
-            .limit(top_k)
-        )
 
         # Execute the query
         result = await self.db_session.execute(final_query)
