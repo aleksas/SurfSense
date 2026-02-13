@@ -10,8 +10,15 @@ from app.db import Chunk, DocumentType
 from app.prompts import SUMMARY_PROMPT_TEMPLATE
 
 
+@lru_cache(maxsize=32)
 def get_model_context_window(model_name: str) -> int:
     """Get the total context window size for a model (input + output tokens)."""
+    if model_name.startswith("ollama"):
+        # LiteLLM model-info lookups for Ollama use OLLAMA_API_BASE.
+        summary_api_base = os.getenv("SURFSENSE_INGEST_SUMMARY_API_BASE", "").strip()
+        if summary_api_base:
+            os.environ.setdefault("OLLAMA_API_BASE", summary_api_base)
+
     try:
         model_info = get_model_info(model_name)
         context_window = model_info.get("max_input_tokens")
@@ -113,6 +120,10 @@ def _build_dedicated_summary_llm(
     timeout: float,
 ):
     """Build and cache a dedicated LLM instance for ingestion summaries."""
+    print(
+        f"Ingestion summary model: {provider}/{model_name} "
+        f"(api_base={api_base or 'default'})"
+    )
     return ChatLiteLLM(
         model=f"{provider}/{model_name}",
         api_base=api_base,
@@ -137,6 +148,8 @@ def resolve_ingestion_summary_llm(fallback_llm):
     provider = os.getenv("SURFSENSE_INGEST_SUMMARY_PROVIDER", "ollama_chat").strip()
     api_base = os.getenv("SURFSENSE_INGEST_SUMMARY_API_BASE", "http://ollama:11434").strip()
     api_key = os.getenv("SURFSENSE_INGEST_SUMMARY_API_KEY", "local").strip() or "local"
+    if provider.startswith("ollama") and api_base:
+        os.environ["OLLAMA_API_BASE"] = api_base
     try:
         temperature = float(os.getenv("SURFSENSE_INGEST_SUMMARY_TEMPERATURE", "0.0"))
     except ValueError:
@@ -226,12 +239,41 @@ async def create_document_chunks(content: str) -> list[Chunk]:
     Returns:
         List of Chunk objects with embeddings
     """
+    chunk_items = list(config.chunker_instance.chunk(content))
+    if not chunk_items:
+        return []
+
+    embedding_model = config.embedding_model_instance
+    chunk_texts = [chunk.text for chunk in chunk_items]
+
+    try:
+        batch_size = int(os.getenv("EMBEDDING_CHUNK_BATCH_SIZE", "4"))
+    except ValueError:
+        batch_size = 4
+    batch_size = max(1, batch_size)
+
+    chunk_embeddings: list = []
+    if hasattr(embedding_model, "embed_batch"):
+        try:
+            for i in range(0, len(chunk_texts), batch_size):
+                batch_texts = chunk_texts[i : i + batch_size]
+                batch_vectors = embedding_model.embed_batch(batch_texts)
+                if len(batch_vectors) != len(batch_texts):
+                    raise ValueError(
+                        "embed_batch returned mismatched vector count; falling back"
+                    )
+                chunk_embeddings.extend(batch_vectors)
+        except Exception:
+            chunk_embeddings = [embedding_model.embed(text) for text in chunk_texts]
+    else:
+        chunk_embeddings = [embedding_model.embed(text) for text in chunk_texts]
+
     return [
         Chunk(
-            content=chunk.text,
-            embedding=config.embedding_model_instance.embed(chunk.text),
+            content=chunk_items[idx].text,
+            embedding=chunk_embeddings[idx],
         )
-        for chunk in config.chunker_instance.chunk(content)
+        for idx in range(len(chunk_items))
     ]
 
 

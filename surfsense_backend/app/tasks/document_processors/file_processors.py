@@ -27,6 +27,7 @@ from app.utils.document_converters import (
     generate_content_hash,
     generate_document_summary,
     generate_unique_identifier_hash,
+    resolve_ingestion_summary_llm,
 )
 
 from .base import (
@@ -458,8 +459,11 @@ async def add_received_file_document_using_unstructured(
             # Content changed - continue to update
 
         # Get user's long context LLM (needed for both create and update)
-        user_llm = await get_user_long_context_llm(session, user_id, search_space_id)
-        if not user_llm:
+        summary_llm = resolve_ingestion_summary_llm(None)
+        if not summary_llm:
+            user_llm = await get_user_long_context_llm(session, user_id, search_space_id)
+            summary_llm = resolve_ingestion_summary_llm(user_llm)
+        if not summary_llm:
             raise RuntimeError(
                 f"No long context LLM configured for user {user_id} in search space {search_space_id}"
             )
@@ -471,7 +475,7 @@ async def add_received_file_document_using_unstructured(
             "document_type": "File Document",
         }
         summary_content, summary_embedding = await generate_document_summary(
-            file_in_markdown, user_llm, document_metadata
+            file_in_markdown, summary_llm, document_metadata
         )
 
         # Process chunks
@@ -601,8 +605,11 @@ async def add_received_file_document_using_llamacloud(
             # Content changed - continue to update
 
         # Get user's long context LLM (needed for both create and update)
-        user_llm = await get_user_long_context_llm(session, user_id, search_space_id)
-        if not user_llm:
+        summary_llm = resolve_ingestion_summary_llm(None)
+        if not summary_llm:
+            user_llm = await get_user_long_context_llm(session, user_id, search_space_id)
+            summary_llm = resolve_ingestion_summary_llm(user_llm)
+        if not summary_llm:
             raise RuntimeError(
                 f"No long context LLM configured for user {user_id} in search space {search_space_id}"
             )
@@ -614,7 +621,7 @@ async def add_received_file_document_using_llamacloud(
             "document_type": "File Document",
         }
         summary_content, summary_embedding = await generate_document_summary(
-            file_in_markdown, user_llm, document_metadata
+            file_in_markdown, summary_llm, document_metadata
         )
 
         # Process chunks
@@ -745,8 +752,11 @@ async def add_received_file_document_using_docling(
             # Content changed - continue to update
 
         # Get user's long context LLM (needed for both create and update)
-        user_llm = await get_user_long_context_llm(session, user_id, search_space_id)
-        if not user_llm:
+        summary_llm = resolve_ingestion_summary_llm(None)
+        if not summary_llm:
+            user_llm = await get_user_long_context_llm(session, user_id, search_space_id)
+            summary_llm = resolve_ingestion_summary_llm(user_llm)
+        if not summary_llm:
             raise RuntimeError(
                 f"No long context LLM configured for user {user_id} in search_space {search_space_id}"
             )
@@ -757,7 +767,7 @@ async def add_received_file_document_using_docling(
         docling_service = create_docling_service()
 
         summary_content = await docling_service.process_large_document_summary(
-            content=file_in_markdown, llm=user_llm, document_title=file_name
+            content=file_in_markdown, llm=summary_llm, document_title=file_name
         )
 
         # Enhance summary with metadata
@@ -1898,16 +1908,19 @@ async def process_file_in_background_with_document(
                 session, notification, stage="chunking"
             )
 
-        user_llm = await get_user_long_context_llm(session, user_id, search_space_id)
+        summary_llm = resolve_ingestion_summary_llm(None)
+        if not summary_llm:
+            user_llm = await get_user_long_context_llm(session, user_id, search_space_id)
+            summary_llm = resolve_ingestion_summary_llm(user_llm)
 
-        if user_llm:
+        if summary_llm:
             document_metadata = {
                 "file_name": filename,
                 "etl_service": etl_service,
                 "document_type": "File Document",
             }
             summary_content, summary_embedding = await generate_document_summary(
-                markdown_content, user_llm, document_metadata
+                markdown_content, summary_llm, document_metadata
             )
         else:
             # Fallback: use truncated content as summary
