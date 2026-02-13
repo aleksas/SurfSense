@@ -1,7 +1,13 @@
 import os
 import shutil
+import json
+import re
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Any, Sequence
+from urllib import error, request
 
+import numpy as np
 import yaml
 from chonkie import AutoEmbeddings, CodeChunker, RecursiveChunker
 from dotenv import load_dotenv
@@ -12,6 +18,225 @@ BASE_DIR = Path(__file__).resolve().parent.parent.parent
 
 env_file = BASE_DIR / ".env"
 load_dotenv(env_file)
+
+
+class OllamaEmbeddings:
+    """Minimal embedding adapter for Ollama's /api/embed endpoint."""
+
+    def __init__(
+        self,
+        model: str,
+        api_base: str = "http://ollama:11434",
+        timeout: float = 180.0,
+        max_seq_length: int = 512,
+        num_gpu: int | None = None,
+    ):
+        self.model = model
+        self.api_base = api_base.rstrip("/")
+        self.timeout = timeout
+        self.max_seq_length = max_seq_length
+        self.num_gpu = num_gpu
+        self.dimension = len(self.embed("ping"))
+
+    def _embed_request(self, inputs: Sequence[str]) -> list[list[float]]:
+        payload_dict = {"model": self.model, "input": list(inputs)}
+        if self.num_gpu is not None:
+            payload_dict["options"] = {"num_gpu": self.num_gpu}
+        payload = json.dumps(payload_dict).encode("utf-8")
+        req = request.Request(
+            f"{self.api_base}/api/embed",
+            data=payload,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            with request.urlopen(req, timeout=self.timeout) as response:
+                data = json.loads(response.read().decode("utf-8"))
+        except error.HTTPError as e:
+            raise ValueError(
+                f"Ollama embedding request failed ({e.code}): {e.reason}"
+            ) from e
+        except Exception as e:
+            raise ValueError(f"Ollama embedding request failed: {e}") from e
+
+        embeddings = data.get("embeddings")
+        if not embeddings:
+            raise ValueError(f"Ollama returned no embeddings for model '{self.model}'")
+        return embeddings
+
+    def embed(self, text: str) -> np.ndarray:
+        return np.asarray(self._embed_request([text])[0], dtype=np.float32)
+
+    def embed_batch(self, texts: list[str]) -> list[np.ndarray]:
+        if not texts:
+            return []
+        vectors = self._embed_request(texts)
+        return [np.asarray(v, dtype=np.float32) for v in vectors]
+
+
+@dataclass
+class OllamaRerankResultItem:
+    document: Any
+    score: float
+    rank: int
+
+
+@dataclass
+class OllamaRerankResults:
+    results: list[OllamaRerankResultItem]
+
+
+class OllamaReranker:
+    """Adapter that mimics rerankers' rank() output using an Ollama model."""
+
+    def __init__(
+        self,
+        model_name: str,
+        api_base: str = "http://ollama:11434",
+        timeout: float = 180.0,
+        max_doc_chars: int = 6000,
+        num_predict: int = 8,
+        num_gpu: int | None = None,
+    ):
+        self.model_name = model_name
+        self.api_base = api_base.rstrip("/")
+        self.timeout = timeout
+        self.max_doc_chars = max_doc_chars
+        self.num_predict = num_predict
+        self.num_gpu = num_gpu
+
+    def _post_json(self, path: str, payload_dict: dict[str, Any]) -> dict[str, Any]:
+        payload = json.dumps(payload_dict).encode("utf-8")
+        req = request.Request(
+            f"{self.api_base}{path}",
+            data=payload,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with request.urlopen(req, timeout=self.timeout) as response:
+            return json.loads(response.read().decode("utf-8"))
+
+    def _parse_score(self, raw_text: str) -> float | None:
+        match = re.search(r"-?\d+(?:\.\d+)?", raw_text)
+        if not match:
+            return None
+        try:
+            score = float(match.group(0))
+        except ValueError:
+            return None
+
+        if 1.0 < score <= 100.0:
+            score /= 100.0
+        return float(max(0.0, min(1.0, score)))
+
+    def _lexical_score(self, query: str, document_text: str) -> float:
+        query_terms = set(re.findall(r"\w+", query.lower()))
+        doc_terms = set(re.findall(r"\w+", document_text.lower()))
+        if not query_terms or not doc_terms:
+            return 0.0
+        overlap = len(query_terms & doc_terms)
+        denom = (len(query_terms) * len(doc_terms)) ** 0.5
+        if denom == 0:
+            return 0.0
+        return float(max(0.0, min(1.0, overlap / denom)))
+
+    def _score_with_generate(self, query: str, document_text: str) -> float:
+        content = (document_text or "")[: self.max_doc_chars]
+        prompt = (
+            "Score document relevance to the query.\n"
+            "Return only one number between 0 and 1.\n\n"
+            f"Query:\n{query}\n\n"
+            f"Document:\n{content}\n\n"
+            "Score:"
+        )
+
+        payload: dict[str, Any] = {
+            "model": self.model_name,
+            "prompt": prompt,
+            "stream": False,
+            "options": {
+                "temperature": 0,
+                "num_predict": self.num_predict,
+            },
+        }
+        if self.num_gpu is not None:
+            payload["options"]["num_gpu"] = self.num_gpu
+
+        try:
+            data = self._post_json("/api/generate", payload)
+        except Exception:
+            return self._lexical_score(query, content)
+        score = self._parse_score((data.get("response") or "").strip())
+        if score is not None:
+            return score
+        return self._lexical_score(query, content)
+
+    def _rank_via_endpoint(
+        self, path: str, query: str, docs: list[Any]
+    ) -> OllamaRerankResults | None:
+        try:
+            data = self._post_json(
+                path,
+                {
+                    "model": self.model_name,
+                    "query": query,
+                    "documents": [doc.text for doc in docs],
+                },
+            )
+        except error.HTTPError as e:
+            if e.code == 404:
+                return None
+            raise
+
+        ranked: list[tuple[int, float]] = []
+        for item in data.get("results", []):
+            index = item.get("index")
+            score = item.get("score")
+            if (
+                isinstance(index, int)
+                and 0 <= index < len(docs)
+                and isinstance(score, (float, int))
+            ):
+                ranked.append((index, float(score)))
+
+        if not ranked:
+            return None
+
+        ranked.sort(key=lambda pair: pair[1], reverse=True)
+        return OllamaRerankResults(
+            results=[
+                OllamaRerankResultItem(
+                    document=docs[index],
+                    score=score,
+                    rank=rank + 1,
+                )
+                for rank, (index, score) in enumerate(ranked)
+            ]
+        )
+
+    def rank(self, query: str, docs: list[Any], **_: Any) -> OllamaRerankResults:
+        # Prefer native rerank endpoints when available.
+        for endpoint in ("/api/rerank", "/v1/rerank"):
+            endpoint_results = self._rank_via_endpoint(endpoint, query, docs)
+            if endpoint_results:
+                return endpoint_results
+
+        # Fallback path for Ollama versions without rerank endpoints.
+        scores = [
+            (i, self._score_with_generate(query, doc.text))
+            for i, doc in enumerate(docs)
+        ]
+        scores.sort(key=lambda pair: pair[1], reverse=True)
+        return OllamaRerankResults(
+            results=[
+                OllamaRerankResultItem(
+                    document=docs[index],
+                    score=score,
+                    rank=rank + 1,
+                )
+                for rank, (index, score) in enumerate(scores)
+            ]
+        )
 
 
 def is_ffmpeg_installed():
@@ -301,6 +526,11 @@ class Config:
 
     # Chonkie Configuration | Edit this to your needs
     EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL")
+    EMBEDDING_MODEL_FALLBACK = os.getenv(
+        "EMBEDDING_MODEL_FALLBACK",
+        "intfloat/multilingual-e5-large-instruct",
+    )
+    EMBEDDING_MODEL_EFFECTIVE = EMBEDDING_MODEL
     # Azure OpenAI credentials from environment variables
     AZURE_OPENAI_ENDPOINT = os.getenv("AZURE_OPENAI_ENDPOINT")
     AZURE_OPENAI_API_KEY = os.getenv("AZURE_OPENAI_API_KEY")
@@ -312,10 +542,50 @@ class Config:
     if AZURE_OPENAI_API_KEY:
         embedding_kwargs["azure_api_key"] = AZURE_OPENAI_API_KEY
 
-    embedding_model_instance = AutoEmbeddings.get_embeddings(
-        EMBEDDING_MODEL,
-        **embedding_kwargs,
-    )
+    if EMBEDDING_MODEL.startswith("ollama://"):
+        ollama_model = EMBEDDING_MODEL.replace("ollama://", "", 1).strip()
+        ollama_api_base = os.getenv("EMBEDDING_OLLAMA_API_BASE", "http://ollama:11434")
+        try:
+            ollama_timeout = float(os.getenv("EMBEDDING_OLLAMA_TIMEOUT", "180"))
+        except ValueError:
+            ollama_timeout = 180.0
+        try:
+            embedding_max_seq_length = int(os.getenv("EMBEDDING_MAX_SEQ_LENGTH", "512"))
+        except ValueError:
+            embedding_max_seq_length = 512
+        default_num_gpu = "0" if "multilingual-e5-large-instruct" in ollama_model else ""
+        raw_num_gpu = os.getenv("EMBEDDING_OLLAMA_NUM_GPU", default_num_gpu).strip()
+        try:
+            ollama_num_gpu = int(raw_num_gpu) if raw_num_gpu else None
+        except ValueError:
+            ollama_num_gpu = 0 if "multilingual-e5-large-instruct" in ollama_model else None
+
+        embedding_model_instance = OllamaEmbeddings(
+            model=ollama_model,
+            api_base=ollama_api_base,
+            timeout=ollama_timeout,
+            max_seq_length=embedding_max_seq_length,
+            num_gpu=ollama_num_gpu,
+        )
+        EMBEDDING_MODEL_EFFECTIVE = f"ollama://{ollama_model}"
+    else:
+        # Jina v3 via Chonkie requires API credentials. If missing, keep startup alive
+        # by falling back to a local multilingual embedding model.
+        if EMBEDDING_MODEL == "jina-embeddings-v3":
+            jina_api_key = os.getenv("JINA_API_KEY", "").strip()
+            if jina_api_key:
+                embedding_kwargs["api_key"] = jina_api_key
+            else:
+                print(
+                    "Warning: EMBEDDING_MODEL=jina-embeddings-v3 requires JINA_API_KEY. "
+                    f"Falling back to {EMBEDDING_MODEL_FALLBACK}."
+                )
+                EMBEDDING_MODEL_EFFECTIVE = EMBEDDING_MODEL_FALLBACK
+
+        embedding_model_instance = AutoEmbeddings.get_embeddings(
+            EMBEDDING_MODEL_EFFECTIVE,
+            **embedding_kwargs,
+        )
     # Prefer GPU for embeddings when available (container must be started with GPU access).
     try:
         import torch
@@ -339,19 +609,59 @@ class Config:
     if RERANKERS_ENABLED:
         RERANKERS_MODEL_NAME = os.getenv("RERANKERS_MODEL_NAME")
         RERANKERS_MODEL_TYPE = os.getenv("RERANKERS_MODEL_TYPE")
-        # FlashRank downloads model artifacts; make it robust against races between
-        # backend/worker/beat processes importing config at the same time.
+        RERANKERS_OLLAMA_API_BASE = os.getenv(
+            "RERANKERS_OLLAMA_API_BASE", "http://ollama:11434"
+        )
+        try:
+            RERANKERS_OLLAMA_TIMEOUT = float(
+                os.getenv("RERANKERS_OLLAMA_TIMEOUT", "180")
+            )
+        except ValueError:
+            RERANKERS_OLLAMA_TIMEOUT = 180.0
+        try:
+            RERANKERS_OLLAMA_MAX_DOC_CHARS = int(
+                os.getenv("RERANKERS_OLLAMA_MAX_DOC_CHARS", "6000")
+            )
+        except ValueError:
+            RERANKERS_OLLAMA_MAX_DOC_CHARS = 6000
+        try:
+            RERANKERS_OLLAMA_NUM_PREDICT = int(
+                os.getenv("RERANKERS_OLLAMA_NUM_PREDICT", "8")
+            )
+        except ValueError:
+            RERANKERS_OLLAMA_NUM_PREDICT = 8
+        raw_reranker_ollama_num_gpu = os.getenv("RERANKERS_OLLAMA_NUM_GPU", "").strip()
+        try:
+            RERANKERS_OLLAMA_NUM_GPU = (
+                int(raw_reranker_ollama_num_gpu)
+                if raw_reranker_ollama_num_gpu
+                else None
+            )
+        except ValueError:
+            RERANKERS_OLLAMA_NUM_GPU = None
+        # Rerankers may download model artifacts; make this robust against races
+        # between backend/worker/beat processes importing config at the same time.
         RERANKERS_CACHE_DIR = os.getenv("RERANKERS_CACHE_DIR", "/tmp/flashrank_cache")
         try:
             os.makedirs(RERANKERS_CACHE_DIR, exist_ok=True)
         except Exception:
             pass
         try:
-            reranker_instance = Reranker(
-                model_name=RERANKERS_MODEL_NAME,
-                model_type=RERANKERS_MODEL_TYPE,
-                cache_dir=RERANKERS_CACHE_DIR,
-            )
+            if (RERANKERS_MODEL_TYPE or "").lower() == "ollama":
+                reranker_instance = OllamaReranker(
+                    model_name=RERANKERS_MODEL_NAME,
+                    api_base=RERANKERS_OLLAMA_API_BASE,
+                    timeout=RERANKERS_OLLAMA_TIMEOUT,
+                    max_doc_chars=RERANKERS_OLLAMA_MAX_DOC_CHARS,
+                    num_predict=RERANKERS_OLLAMA_NUM_PREDICT,
+                    num_gpu=RERANKERS_OLLAMA_NUM_GPU,
+                )
+            else:
+                reranker_instance = Reranker(
+                    model_name=RERANKERS_MODEL_NAME,
+                    model_type=RERANKERS_MODEL_TYPE,
+                    cache_dir=RERANKERS_CACHE_DIR,
+                )
         except Exception as e:
             print(f"Warning: Failed to initialize reranker ({RERANKERS_MODEL_TYPE}): {e}")
             reranker_instance = None
@@ -406,7 +716,7 @@ class Config:
         and embedding_model_instance.dimension > 2000
     ):
         raise ValueError(
-            f"Embedding dimension for Model: {EMBEDDING_MODEL} "
+            f"Embedding dimension for Model: {EMBEDDING_MODEL_EFFECTIVE} "
             f"has {embedding_model_instance.dimension} dimensions, which "
             f"exceeds the maximum of 2000 allowed by PGVector."
         )

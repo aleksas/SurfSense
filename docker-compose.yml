@@ -62,7 +62,7 @@ services:
       - |
           set -e
           until curl -sf http://ollama:11434/api/tags >/dev/null; do sleep 1; done
-          for m in qwen3:30b-a3b qwen3:8b; do
+          for m in qwen3:30b-a3b qwen3:8b qllama/multilingual-e5-large-instruct:latest dengcao/Qwen3-Reranker-0.6B:Q8_0; do
             echo "Pulling $$m"
             curl -sS -X POST http://ollama:11434/api/pull -H 'Content-Type: application/json' -d "{\"name\":\"$$m\"}" >/dev/null
           done
