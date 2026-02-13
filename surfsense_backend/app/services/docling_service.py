@@ -200,6 +200,12 @@ class DoclingService:
         Returns:
             Final summary of the document
         """
+        # Allow a dedicated ingestion summary model override (e.g., qwen3:8b)
+        # so heavy chat models are not used during indexing.
+        from app.utils.document_converters import resolve_ingestion_summary_llm
+
+        llm = resolve_ingestion_summary_llm(llm)
+
         # Large document threshold (100K characters ≈ 25K tokens)
         large_document_threshold = 100_000
 

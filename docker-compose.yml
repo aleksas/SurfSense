@@ -51,7 +51,7 @@ services:
       - ollama_data:/root/.ollama
     restart: unless-stopped
 
-  # Best-effort pre-pull of common local models so the UI can be used immediately.
+  # Best-effort pre-pull of chat + ingestion-summary models used in this project.
   # Comment this out if you prefer to pull models manually.
   ollama_init:
     image: curlimages/curl:latest
@@ -62,7 +62,7 @@ services:
       - |
           set -e
           until curl -sf http://ollama:11434/api/tags >/dev/null; do sleep 1; done
-          for m in llama3.1 gemma2:9b qwen2.5:7b mistral-small qwen3:8b qwen3:30b-a3b glm-4.7-flash:latest; do
+          for m in qwen3:30b-a3b qwen3:8b; do
             echo "Pulling $$m"
             curl -sS -X POST http://ollama:11434/api/pull -H 'Content-Type: application/json' -d "{\"name\":\"$$m\"}" >/dev/null
           done

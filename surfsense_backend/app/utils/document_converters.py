@@ -1,6 +1,9 @@
 import hashlib
+import os
+from functools import lru_cache
 
 from litellm import get_model_info, token_counter
+from langchain_litellm import ChatLiteLLM
 
 from app.config import config
 from app.db import Chunk, DocumentType
@@ -100,6 +103,66 @@ def optimize_content_for_context_window(
     return optimized_content
 
 
+@lru_cache(maxsize=4)
+def _build_dedicated_summary_llm(
+    provider: str,
+    model_name: str,
+    api_base: str | None,
+    api_key: str,
+    temperature: float,
+    timeout: float,
+):
+    """Build and cache a dedicated LLM instance for ingestion summaries."""
+    return ChatLiteLLM(
+        model=f"{provider}/{model_name}",
+        api_base=api_base,
+        api_key=api_key,
+        temperature=temperature,
+        timeout=timeout,
+        streaming=False,
+    )
+
+
+def resolve_ingestion_summary_llm(fallback_llm):
+    """
+    Resolve which LLM to use for ingestion summaries.
+
+    If SURFSENSE_INGEST_SUMMARY_MODEL is set, use that dedicated model.
+    Otherwise, use the caller-provided fallback LLM.
+    """
+    model_name = os.getenv("SURFSENSE_INGEST_SUMMARY_MODEL", "").strip()
+    if not model_name:
+        return fallback_llm
+
+    provider = os.getenv("SURFSENSE_INGEST_SUMMARY_PROVIDER", "ollama_chat").strip()
+    api_base = os.getenv("SURFSENSE_INGEST_SUMMARY_API_BASE", "http://ollama:11434").strip()
+    api_key = os.getenv("SURFSENSE_INGEST_SUMMARY_API_KEY", "local").strip() or "local"
+    try:
+        temperature = float(os.getenv("SURFSENSE_INGEST_SUMMARY_TEMPERATURE", "0.0"))
+    except ValueError:
+        temperature = 0.0
+    try:
+        timeout = float(os.getenv("SURFSENSE_INGEST_SUMMARY_TIMEOUT", "180"))
+    except ValueError:
+        timeout = 180.0
+
+    try:
+        return _build_dedicated_summary_llm(
+            provider=provider,
+            model_name=model_name,
+            api_base=api_base or None,
+            api_key=api_key,
+            temperature=temperature,
+            timeout=timeout,
+        )
+    except Exception as e:
+        print(
+            f"Warning: Failed to initialize dedicated ingestion summary model "
+            f"({provider}/{model_name}): {e}. Falling back to configured long-context LLM."
+        )
+        return fallback_llm
+
+
 async def generate_document_summary(
     content: str,
     user_llm,
@@ -116,15 +179,17 @@ async def generate_document_summary(
     Returns:
         Tuple of (enhanced_summary_content, summary_embedding)
     """
-    # Get model name from user_llm for token counting
-    model_name = getattr(user_llm, "model", "gpt-3.5-turbo")  # Fallback to default
+    summary_llm = resolve_ingestion_summary_llm(user_llm)
+
+    # Get model name from summary llm for token counting
+    model_name = getattr(summary_llm, "model", "gpt-3.5-turbo")  # Fallback to default
 
     # Optimize content to fit within context window
     optimized_content = optimize_content_for_context_window(
         content, document_metadata, model_name
     )
 
-    summary_chain = SUMMARY_PROMPT_TEMPLATE | user_llm
+    summary_chain = SUMMARY_PROMPT_TEMPLATE | summary_llm
     content_with_metadata = f"<DOCUMENT><DOCUMENT_METADATA>\n\n{document_metadata}\n\n</DOCUMENT_METADATA>\n\n<DOCUMENT_CONTENT>\n\n{optimized_content}\n\n</DOCUMENT_CONTENT></DOCUMENT>"
     summary_result = await summary_chain.ainvoke({"document": content_with_metadata})
     summary_content = summary_result.content
