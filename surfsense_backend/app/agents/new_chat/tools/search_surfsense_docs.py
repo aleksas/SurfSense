@@ -152,7 +152,12 @@ async def search_surfsense_docs_async(
             return kb_results
 
     # Get embedding for the query
-    query_embedding = config.embedding_model_instance.embed(query)
+    embedding_model = config.embedding_model_instance
+    query_embedding = (
+        embedding_model.embed_query(query)
+        if hasattr(embedding_model, "embed_query")
+        else embedding_model.embed(query)
+    )
 
     # Vector similarity search on chunks, joining with documents
     stmt = (

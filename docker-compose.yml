@@ -45,7 +45,7 @@ services:
       # Keep the last-loaded model in memory longer to avoid repeated 15-60s cold loads.
       - OLLAMA_KEEP_ALIVE=${OLLAMA_KEEP_ALIVE:-30m}
       # Avoid loading multiple large models concurrently on a single GPU.
-      - OLLAMA_MAX_LOADED_MODELS=${OLLAMA_MAX_LOADED_MODELS:-1}
+      - OLLAMA_MAX_LOADED_MODELS=${OLLAMA_MAX_LOADED_MODELS:-4}
       - OLLAMA_NUM_PARALLEL=${OLLAMA_NUM_PARALLEL:-1}
     volumes:
       - ollama_data:/root/.ollama

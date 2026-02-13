@@ -268,7 +268,12 @@ def create_recall_memory_tool(
 
             if query:
                 # Semantic search using embeddings
-                query_embedding = config.embedding_model_instance.embed(query)
+                embedding_model = config.embedding_model_instance
+                query_embedding = (
+                    embedding_model.embed_query(query)
+                    if hasattr(embedding_model, "embed_query")
+                    else embedding_model.embed(query)
+                )
 
                 # Build query with vector similarity
                 stmt = (

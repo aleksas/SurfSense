@@ -20,6 +20,13 @@ env_file = BASE_DIR / ".env"
 load_dotenv(env_file)
 
 
+def _env_bool(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
 class OllamaEmbeddings:
     """Minimal embedding adapter for Ollama's /api/embed endpoint."""
 
@@ -39,25 +46,46 @@ class OllamaEmbeddings:
         self.dimension = len(self.embed("ping"))
 
     def _embed_request(self, inputs: Sequence[str]) -> list[list[float]]:
-        payload_dict = {"model": self.model, "input": list(inputs)}
-        if self.num_gpu is not None:
-            payload_dict["options"] = {"num_gpu": self.num_gpu}
-        payload = json.dumps(payload_dict).encode("utf-8")
-        req = request.Request(
-            f"{self.api_base}/api/embed",
-            data=payload,
-            headers={"Content-Type": "application/json"},
-            method="POST",
-        )
-        try:
+        def _make_request(num_gpu_value: int | None) -> dict[str, Any]:
+            payload_dict: dict[str, Any] = {"model": self.model, "input": list(inputs)}
+            if num_gpu_value is not None:
+                payload_dict["options"] = {"num_gpu": num_gpu_value}
+            payload = json.dumps(payload_dict).encode("utf-8")
+            req = request.Request(
+                f"{self.api_base}/api/embed",
+                data=payload,
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
             with request.urlopen(req, timeout=self.timeout) as response:
-                data = json.loads(response.read().decode("utf-8"))
+                return json.loads(response.read().decode("utf-8"))
+
+        try:
+            data = _make_request(self.num_gpu)
         except error.HTTPError as e:
-            raise ValueError(
-                f"Ollama embedding request failed ({e.code}): {e.reason}"
-            ) from e
+            # Some embedding models (e.g. multilingual-e5 on certain GPU setups)
+            # return NaN with GPU offload. Retry once on CPU instead of failing.
+            if self.num_gpu not in (None, 0):
+                try:
+                    error_body = e.read().decode("utf-8", errors="ignore")
+                except Exception:
+                    error_body = ""
+                if "NaN" in error_body:
+                    data = _make_request(0)
+                else:
+                    raise ValueError(
+                        f"Ollama embedding request failed ({e.code}): {e.reason}"
+                    ) from e
+            else:
+                raise ValueError(
+                    f"Ollama embedding request failed ({e.code}): {e.reason}"
+                ) from e
+        except ValueError:
+            raise
         except Exception as e:
-            raise ValueError(f"Ollama embedding request failed: {e}") from e
+            raise ValueError(
+                f"Ollama embedding request failed: {e}"
+            ) from e
 
         embeddings = data.get("embeddings")
         if not embeddings:
@@ -72,6 +100,75 @@ class OllamaEmbeddings:
             return []
         vectors = self._embed_request(texts)
         return [np.asarray(v, dtype=np.float32) for v in vectors]
+
+
+class JinaV3SentenceTransformerEmbeddings:
+    """Jina v3 embeddings via sentence-transformers with task-aware encoding."""
+
+    def __init__(
+        self,
+        model_name: str = "jinaai/jina-embeddings-v3",
+        device: str | None = None,
+        max_seq_length: int = 512,
+        query_task: str = "retrieval.query",
+        passage_task: str = "retrieval.passage",
+        normalize_embeddings: bool = True,
+        trust_remote_code: bool = True,
+    ):
+        try:
+            from sentence_transformers import SentenceTransformer
+        except ImportError as e:
+            raise ValueError(
+                "sentence-transformers is required for jinaai/jina-embeddings-v3"
+            ) from e
+
+        self.model_name = model_name
+        self.query_task = query_task
+        self.passage_task = passage_task
+        self.normalize_embeddings = normalize_embeddings
+        self.max_seq_length = max_seq_length
+        self.device = device
+
+        model_kwargs: dict[str, Any] = {"trust_remote_code": trust_remote_code}
+        if device:
+            model_kwargs["device"] = device
+
+        self.model = SentenceTransformer(model_name, **model_kwargs)
+        if max_seq_length > 0:
+            self.model.max_seq_length = max_seq_length
+        self.dimension = int(self.model.get_sentence_embedding_dimension())
+
+    def _encode(self, texts: list[str], task: str) -> np.ndarray:
+        encode_kwargs: dict[str, Any] = {
+            "convert_to_numpy": True,
+            "normalize_embeddings": self.normalize_embeddings,
+            "task": task,
+        }
+        try:
+            vectors = self.model.encode(texts, **encode_kwargs)
+        except TypeError:
+            # Safety fallback if a future model revision does not accept task.
+            encode_kwargs.pop("task", None)
+            vectors = self.model.encode(texts, **encode_kwargs)
+        return np.asarray(vectors, dtype=np.float32)
+
+    def embed(self, text: str) -> np.ndarray:
+        return self._encode([text], task=self.passage_task)[0]
+
+    def embed_batch(self, texts: list[str]) -> list[np.ndarray]:
+        if not texts:
+            return []
+        vectors = self._encode(texts, task=self.passage_task)
+        return [vectors[i] for i in range(len(vectors))]
+
+    def embed_query(self, text: str) -> np.ndarray:
+        return self._encode([text], task=self.query_task)[0]
+
+    def embed_query_batch(self, texts: list[str]) -> list[np.ndarray]:
+        if not texts:
+            return []
+        vectors = self._encode(texts, task=self.query_task)
+        return [vectors[i] for i in range(len(vectors))]
 
 
 @dataclass
@@ -553,12 +650,12 @@ class Config:
             embedding_max_seq_length = int(os.getenv("EMBEDDING_MAX_SEQ_LENGTH", "512"))
         except ValueError:
             embedding_max_seq_length = 512
-        default_num_gpu = "0" if "multilingual-e5-large-instruct" in ollama_model else ""
+        default_num_gpu = ""
         raw_num_gpu = os.getenv("EMBEDDING_OLLAMA_NUM_GPU", default_num_gpu).strip()
         try:
             ollama_num_gpu = int(raw_num_gpu) if raw_num_gpu else None
         except ValueError:
-            ollama_num_gpu = 0 if "multilingual-e5-large-instruct" in ollama_model else None
+            ollama_num_gpu = None
 
         embedding_model_instance = OllamaEmbeddings(
             model=ollama_model,
@@ -568,20 +665,35 @@ class Config:
             num_gpu=ollama_num_gpu,
         )
         EMBEDDING_MODEL_EFFECTIVE = f"ollama://{ollama_model}"
-    else:
-        # Jina v3 via Chonkie requires API credentials. If missing, keep startup alive
-        # by falling back to a local multilingual embedding model.
-        if EMBEDDING_MODEL == "jina-embeddings-v3":
-            jina_api_key = os.getenv("JINA_API_KEY", "").strip()
-            if jina_api_key:
-                embedding_kwargs["api_key"] = jina_api_key
-            else:
-                print(
-                    "Warning: EMBEDDING_MODEL=jina-embeddings-v3 requires JINA_API_KEY. "
-                    f"Falling back to {EMBEDDING_MODEL_FALLBACK}."
-                )
-                EMBEDDING_MODEL_EFFECTIVE = EMBEDDING_MODEL_FALLBACK
+    elif EMBEDDING_MODEL.strip().lower() in {
+        "jina-embeddings-v3",
+        "jinaai/jina-embeddings-v3",
+    }:
+        jina_model_name = "jinaai/jina-embeddings-v3"
+        jina_device = os.getenv("EMBEDDING_DEVICE", "").strip() or None
+        if jina_device is None:
+            try:
+                import torch
 
+                jina_device = "cuda" if torch.cuda.is_available() else "cpu"
+            except Exception:
+                jina_device = "cpu"
+        try:
+            embedding_max_seq_length = int(os.getenv("EMBEDDING_MAX_SEQ_LENGTH", "512"))
+        except ValueError:
+            embedding_max_seq_length = 512
+
+        embedding_model_instance = JinaV3SentenceTransformerEmbeddings(
+            model_name=jina_model_name,
+            device=jina_device,
+            max_seq_length=embedding_max_seq_length,
+            query_task=os.getenv("EMBEDDING_JINA_QUERY_TASK", "retrieval.query"),
+            passage_task=os.getenv("EMBEDDING_JINA_PASSAGE_TASK", "retrieval.passage"),
+            normalize_embeddings=_env_bool("EMBEDDING_JINA_NORMALIZE", True),
+            trust_remote_code=_env_bool("EMBEDDING_JINA_TRUST_REMOTE_CODE", True),
+        )
+        EMBEDDING_MODEL_EFFECTIVE = jina_model_name
+    else:
         embedding_model_instance = AutoEmbeddings.get_embeddings(
             EMBEDDING_MODEL_EFFECTIVE,
             **embedding_kwargs,

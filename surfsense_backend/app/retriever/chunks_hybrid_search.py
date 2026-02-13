@@ -49,7 +49,11 @@ class ChucksHybridSearchRetriever:
 
         # Get embedding for the query
         embedding_model = config.embedding_model_instance
-        query_embedding = embedding_model.embed(query_text)
+        query_embedding = (
+            embedding_model.embed_query(query_text)
+            if hasattr(embedding_model, "embed_query")
+            else embedding_model.embed(query_text)
+        )
 
         # Build the query filtered by search space
         query = (
@@ -178,7 +182,11 @@ class ChucksHybridSearchRetriever:
 
         # Get embedding for the query
         embedding_model = config.embedding_model_instance
-        query_embedding = embedding_model.embed(query_text)
+        query_embedding = (
+            embedding_model.embed_query(query_text)
+            if hasattr(embedding_model, "embed_query")
+            else embedding_model.embed(query_text)
+        )
 
         quoted = _extract_longest_quoted_phrase(query_text)
 
