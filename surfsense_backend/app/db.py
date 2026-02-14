@@ -1713,7 +1713,13 @@ class RefreshToken(Base, TimestampMixin):
         return not self.is_expired and not self.is_revoked
 
 
-engine = create_async_engine(DATABASE_URL)
+engine = create_async_engine(
+    DATABASE_URL,
+    # Avoid intermittent "connection is closed" errors by validating pooled
+    # connections before use and recycling long-lived idle connections.
+    pool_pre_ping=True,
+    pool_recycle=1800,
+)
 async_session_maker = async_sessionmaker(engine, expire_on_commit=False)
 
 
