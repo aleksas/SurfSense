@@ -194,6 +194,7 @@ class OllamaReranker:
         max_doc_chars: int = 6000,
         num_predict: int = 8,
         num_gpu: int | None = None,
+        num_ctx: int | None = None,
     ):
         self.model_name = model_name
         self.api_base = api_base.rstrip("/")
@@ -201,6 +202,7 @@ class OllamaReranker:
         self.max_doc_chars = max_doc_chars
         self.num_predict = num_predict
         self.num_gpu = num_gpu
+        self.num_ctx = num_ctx
 
     def _post_json(self, path: str, payload_dict: dict[str, Any]) -> dict[str, Any]:
         payload = json.dumps(payload_dict).encode("utf-8")
@@ -258,6 +260,8 @@ class OllamaReranker:
         }
         if self.num_gpu is not None:
             payload["options"]["num_gpu"] = self.num_gpu
+        if self.num_ctx is not None:
+            payload["options"]["num_ctx"] = self.num_ctx
 
         try:
             data = self._post_json("/api/generate", payload)
@@ -751,6 +755,15 @@ class Config:
             )
         except ValueError:
             RERANKERS_OLLAMA_NUM_GPU = None
+        raw_reranker_ollama_num_ctx = os.getenv("RERANKERS_OLLAMA_NUM_CTX", "").strip()
+        try:
+            RERANKERS_OLLAMA_NUM_CTX = (
+                int(raw_reranker_ollama_num_ctx)
+                if raw_reranker_ollama_num_ctx
+                else None
+            )
+        except ValueError:
+            RERANKERS_OLLAMA_NUM_CTX = None
         # Rerankers may download model artifacts; make this robust against races
         # between backend/worker/beat processes importing config at the same time.
         RERANKERS_CACHE_DIR = os.getenv("RERANKERS_CACHE_DIR", "/tmp/flashrank_cache")
@@ -767,6 +780,7 @@ class Config:
                     max_doc_chars=RERANKERS_OLLAMA_MAX_DOC_CHARS,
                     num_predict=RERANKERS_OLLAMA_NUM_PREDICT,
                     num_gpu=RERANKERS_OLLAMA_NUM_GPU,
+                    num_ctx=RERANKERS_OLLAMA_NUM_CTX,
                 )
             else:
                 reranker_instance = Reranker(

@@ -373,6 +373,13 @@ def create_chat_litellm_from_config(llm_config: dict) -> ChatLiteLLM | None:
         litellm_kwargs["request_timeout"] = float(
             os.getenv("SURFSENSE_OLLAMA_REQUEST_TIMEOUT", "180")
         )
+    if provider == "OLLAMA" and "num_ctx" not in litellm_kwargs:
+        raw_num_ctx = os.getenv("SURFSENSE_OLLAMA_NUM_CTX", "").strip()
+        if raw_num_ctx:
+            try:
+                litellm_kwargs["num_ctx"] = int(raw_num_ctx)
+            except ValueError:
+                pass
 
     return ChatLiteLLM(**litellm_kwargs)
 
@@ -435,5 +442,12 @@ def create_chat_litellm_from_agent_config(
         litellm_kwargs["request_timeout"] = float(
             os.getenv("SURFSENSE_OLLAMA_REQUEST_TIMEOUT", "180")
         )
+    if agent_config.provider.upper() == "OLLAMA" and "num_ctx" not in litellm_kwargs:
+        raw_num_ctx = os.getenv("SURFSENSE_OLLAMA_NUM_CTX", "").strip()
+        if raw_num_ctx:
+            try:
+                litellm_kwargs["num_ctx"] = int(raw_num_ctx)
+            except ValueError:
+                pass
 
     return ChatLiteLLM(**litellm_kwargs)
