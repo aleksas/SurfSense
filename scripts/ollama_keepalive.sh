@@ -8,7 +8,8 @@ set -eu
 
 OLLAMA_URL="${OLLAMA_URL:-http://ollama:11434}"
 
-CHAT_MODEL="${OLLAMA_KEEPALIVE_CHAT_MODEL:-qwen3:30b-a3b}"
+# Default to the main chat model unless overridden.
+CHAT_MODEL="${OLLAMA_KEEPALIVE_CHAT_MODEL:-qwen3:14b}"
 CHAT_NUM_CTX="${OLLAMA_KEEPALIVE_CHAT_NUM_CTX:-8192}"
 
 RERANK_MODEL="${OLLAMA_KEEPALIVE_RERANK_MODEL:-dengcao/Qwen3-Reranker-0.6B:Q8_0}"
@@ -42,7 +43,7 @@ post_rerank() {
       \"prompt\": \"Return only one number between 0 and 1.\\n\\nQuery: ping\\n\\nDocument: pong\\n\\nScore:\",
       \"stream\": false,
       \"keep_alive\": \"${KEEP_ALIVE}\",
-      \"options\": {\"temperature\": 0, \"num_predict\": 8, \"num_ctx\": ${RERANK_NUM_CTX}}
+      \"options\": {\"temperature\": 0, \"num_predict\": 8, \"num_ctx\": ${RERANK_NUM_CTX}, \"num_gpu\": 0}
     }" >/dev/null
 }
 
@@ -56,4 +57,3 @@ while true; do
 
   sleep "${REFRESH_SECS}"
 done
-

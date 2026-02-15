@@ -9,6 +9,7 @@ Supports loading LLM configurations from:
 - NewLLMConfig database table (positive IDs for user-created configs with prompt settings)
 """
 
+import asyncio
 import json
 import os
 import re
@@ -261,7 +262,7 @@ def _format_retrieved_docs_for_user(
             if not content:
                 continue
 
-            header = f"### Chunk {chunk_id}" if chunk_id is not None else "### Chunk"
+            header = f"### [citation:{chunk_id}]" if chunk_id is not None else "### Chunk"
             block = "\n".join([header, "```text", content, "```"])
             if total + len(block) > max_chars:
                 break
@@ -470,6 +471,63 @@ async def stream_new_chat(
     """
     streaming_service = VercelStreamingService()
 
+    # Track thinking steps for chain-of-thought display
+    thinking_step_counter = 0
+    # Map run_id -> step_id for tool calls so we can update them on completion
+    tool_step_ids: dict[str, str] = {}
+    # Track the last active step so we can mark it complete at the end
+    last_active_step_id: str | None = None
+    last_active_step_title: str = ""
+    last_active_step_items: list[str] = []
+    # Track which steps have been completed to avoid duplicate completions
+    completed_step_ids: set[str] = set()
+    # Track if we just finished a tool (text flows silently after tools)
+    just_finished_tool: bool = False
+    # Keep raw KB tool output in case the model returns an empty final answer.
+    last_kb_tool_output_text: str = ""
+
+    def next_thinking_step_id() -> str:
+        nonlocal thinking_step_counter
+        thinking_step_counter += 1
+        return f"thinking-{thinking_step_counter}"
+
+    def complete_current_step() -> str | None:
+        """Complete the current active step and return the completion event, if any."""
+        nonlocal last_active_step_id, last_active_step_title, last_active_step_items
+        if last_active_step_id and last_active_step_id not in completed_step_ids:
+            completed_step_ids.add(last_active_step_id)
+            return streaming_service.format_thinking_step(
+                step_id=last_active_step_id,
+                title=last_active_step_title,
+                status="completed",
+                items=last_active_step_items if last_active_step_items else None,
+            )
+        return None
+
+    # Start the message stream immediately to avoid UI "frozen" state during pre-search/setup
+    yield streaming_service.format_message_start()
+    yield streaming_service.format_start_step()
+
+    # Initial thinking step - Analyzing the request
+    analyze_step_id = next_thinking_step_id()
+    last_active_step_id = analyze_step_id
+    last_active_step_title = "Analyzing your request"
+    
+    # Add the user query to items for context
+    query_text = user_query[:80] + ("..." if len(user_query) > 80 else "")
+    last_active_step_items = [query_text]
+
+    yield streaming_service.format_thinking_step(
+        step_id=analyze_step_id,
+        title=last_active_step_title,
+        status="in_progress",
+        items=last_active_step_items,
+    )
+
+    # Force flush the initial message and thinking step to the client immediately
+    # This ensures the UI updates before the potentially long-running pre-search starts
+    await asyncio.sleep(0)
+
     # Track the current text block for streaming (defined early for exception handling)
     current_text_id: str | None = None
 
@@ -492,6 +550,7 @@ async def stream_new_chat(
                     f"Failed to load NewLLMConfig with id {llm_config_id}"
                 )
                 yield streaming_service.format_done()
+                await asyncio.sleep(0)
                 return
 
             # Create ChatLiteLLM from AgentConfig
@@ -504,6 +563,7 @@ async def stream_new_chat(
                     f"Failed to load LLM config with id {llm_config_id}"
                 )
                 yield streaming_service.format_done()
+                await asyncio.sleep(0)
                 return
 
             # Create ChatLiteLLM from YAML config dict
@@ -514,6 +574,7 @@ async def stream_new_chat(
         if not llm:
             yield streaming_service.format_error("Failed to create LLM instance")
             yield streaming_service.format_done()
+            await asyncio.sleep(0)
             return
 
         # Create connector service
@@ -536,6 +597,16 @@ async def stream_new_chat(
         should_bypass_agent = False
 
         if presearch_enabled and (user_query or "").strip():
+            # Update thinking step to indicate search is starting
+            last_active_step_title = "Searching knowledge base"
+            yield streaming_service.format_thinking_step(
+                step_id=analyze_step_id,
+                title=last_active_step_title,
+                status="in_progress",
+                items=[*last_active_step_items, "Retrieving relevant context..."],
+            )
+            await asyncio.sleep(0)
+            
             try:
                 # Celestia forum/docs are ingested as FILE docs in this repo.
                 _src, file_docs = await connector_service.search_files(
@@ -661,7 +732,8 @@ async def stream_new_chat(
         if presearch_text and not should_bypass_agent:
             context_parts.append(
                 "<retrieved_context>\n"
-                "Below are verbatim excerpts from indexed documents.\n"
+                "Below are verbatim excerpts from indexed documents. "
+                "Each match starts with a clickable `[citation:ID]` that you can use to view the full source.\n\n"
                 "Use them as the primary source of truth.\n"
                 "</retrieved_context>\n"
                 f"{presearch_text}"
@@ -713,52 +785,8 @@ async def stream_new_chat(
             "recursion_limit": 80,  # Increase from default 25 to allow more tool iterations
         }
 
-        # Start the message stream
-        yield streaming_service.format_message_start()
-        yield streaming_service.format_start_step()
-
         # Reset text tracking for this stream
         accumulated_text = ""
-
-        # Track thinking steps for chain-of-thought display
-        thinking_step_counter = 0
-        # Map run_id -> step_id for tool calls so we can update them on completion
-        tool_step_ids: dict[str, str] = {}
-        # Track the last active step so we can mark it complete at the end
-        last_active_step_id: str | None = None
-        last_active_step_title: str = ""
-        last_active_step_items: list[str] = []
-        # Track which steps have been completed to avoid duplicate completions
-        completed_step_ids: set[str] = set()
-        # Track if we just finished a tool (text flows silently after tools)
-        just_finished_tool: bool = False
-        # Track write_todos calls to show "Creating plan" vs "Updating plan"
-        # Disabled for now
-        # write_todos_call_count: int = 0
-        # Keep raw KB tool output in case the model returns an empty final answer.
-        last_kb_tool_output_text: str = ""
-
-        def next_thinking_step_id() -> str:
-            nonlocal thinking_step_counter
-            thinking_step_counter += 1
-            return f"thinking-{thinking_step_counter}"
-
-        def complete_current_step() -> str | None:
-            """Complete the current active step and return the completion event, if any."""
-            nonlocal last_active_step_id, last_active_step_title, last_active_step_items
-            if last_active_step_id and last_active_step_id not in completed_step_ids:
-                completed_step_ids.add(last_active_step_id)
-                return streaming_service.format_thinking_step(
-                    step_id=last_active_step_id,
-                    title=last_active_step_title,
-                    status="completed",
-                    items=last_active_step_items if last_active_step_items else None,
-                )
-            return None
-
-        # Initial thinking step - analyzing the request
-        analyze_step_id = next_thinking_step_id()
-        last_active_step_id = analyze_step_id
 
         # Determine step title and action verb based on context
         if attachments and (mentioned_documents or mentioned_surfsense_docs):
@@ -822,18 +850,24 @@ async def stream_new_chat(
 
         last_active_step_items = [f"{action_verb}: {' '.join(processing_parts)}"]
 
+        # If we were searching, append that info as well
+        if presearch_text:
+            last_active_step_items.append("Context retrieval completed")
+
         yield streaming_service.format_thinking_step(
             step_id=analyze_step_id,
             title=last_active_step_title,
             status="in_progress",
             items=last_active_step_items,
         )
+        await asyncio.sleep(0)
 
         if should_bypass_agent:
             # Lookup-only mode: return grounded chunks directly instead of relying on tool-calling.
             completion_event = complete_current_step()
             if completion_event:
                 yield completion_event
+                await asyncio.sleep(0)
 
             bypass_step_id = next_thinking_step_id()
             yield streaming_service.format_thinking_step(
@@ -842,10 +876,16 @@ async def stream_new_chat(
                 status="completed",
                 items=["Returning exact matches from indexed content"],
             )
+            await asyncio.sleep(0)
 
             current_text_id = streaming_service.generate_text_id()
             yield streaming_service.format_text_start(current_text_id)
-            yield streaming_service.format_text_delta(current_text_id, presearch_text)
+            
+            bypass_intro = (
+                "I found the following matches in your knowledge base. "
+                "You can click on the `[citation:ID]` headers to view the full source for each excerpt.\n\n"
+            )
+            yield streaming_service.format_text_delta(current_text_id, bypass_intro + presearch_text)
             yield streaming_service.format_text_end(current_text_id)
             current_text_id = None
             accumulated_text = presearch_text
@@ -872,6 +912,7 @@ async def stream_new_chat(
                             completion_event = complete_current_step()
                             if completion_event:
                                 yield completion_event
+                                await asyncio.sleep(0)
 
                             if just_finished_tool:
                                 # Clear the active step tracking - text flows without a dedicated step
@@ -906,6 +947,7 @@ async def stream_new_chat(
                     completion_event = complete_current_step()
                     if completion_event:
                         yield completion_event
+                        await asyncio.sleep(0)
 
                 # Reset the just_finished_tool flag since we're starting a new tool
                 just_finished_tool = False
@@ -930,6 +972,7 @@ async def stream_new_chat(
                         status="in_progress",
                         items=last_active_step_items,
                     )
+                    await asyncio.sleep(0)
                 elif tool_name == "link_preview":
                     url = (
                         tool_input.get("url", "")
@@ -946,6 +989,7 @@ async def stream_new_chat(
                         status="in_progress",
                         items=last_active_step_items,
                     )
+                    await asyncio.sleep(0)
                 elif tool_name == "display_image":
                     src = (
                         tool_input.get("src", "")
@@ -967,6 +1011,7 @@ async def stream_new_chat(
                         status="in_progress",
                         items=last_active_step_items,
                     )
+                    await asyncio.sleep(0)
                 elif tool_name == "scrape_webpage":
                     url = (
                         tool_input.get("url", "")
@@ -983,6 +1028,7 @@ async def stream_new_chat(
                         status="in_progress",
                         items=last_active_step_items,
                     )
+                    await asyncio.sleep(0)
                 # elif tool_name == "write_todos":  # Disabled for now
                 #     # Track write_todos calls for better messaging
                 #     write_todos_call_count += 1
@@ -1061,6 +1107,7 @@ async def stream_new_chat(
                         status="in_progress",
                         items=last_active_step_items,
                     )
+                    await asyncio.sleep(0)
                 # elif tool_name == "ls":
                 #     last_active_step_title = "Exploring files"
                 #     last_active_step_items = []
@@ -1078,6 +1125,7 @@ async def stream_new_chat(
                         title=last_active_step_title,
                         status="in_progress",
                     )
+                await asyncio.sleep(0)
 
                 # Stream tool info
                 tool_call_id = (
@@ -1152,6 +1200,7 @@ async def stream_new_chat(
                         status="completed",
                         items=completed_items,
                     )
+                    await asyncio.sleep(0)
                 elif tool_name == "link_preview":
                     # Build completion items based on link preview result
                     if isinstance(tool_output, dict):
@@ -1177,6 +1226,7 @@ async def stream_new_chat(
                         status="completed",
                         items=completed_items,
                     )
+                    await asyncio.sleep(0)
                 elif tool_name == "display_image":
                     # Build completion items for image analysis
                     if isinstance(tool_output, dict):
@@ -1195,6 +1245,7 @@ async def stream_new_chat(
                         status="completed",
                         items=completed_items,
                     )
+                    await asyncio.sleep(0)
                 elif tool_name == "scrape_webpage":
                     # Build completion items for webpage scraping
                     if isinstance(tool_output, dict):
@@ -1220,6 +1271,7 @@ async def stream_new_chat(
                         status="completed",
                         items=completed_items,
                     )
+                    await asyncio.sleep(0)
                 elif tool_name == "generate_podcast":
                     # Build detailed completion items based on podcast status
                     podcast_status = (
@@ -1264,6 +1316,7 @@ async def stream_new_chat(
                         status="completed",
                         items=completed_items,
                     )
+                    await asyncio.sleep(0)
                 # elif tool_name == "write_todos":  # Disabled for now
                 #     # Build completion items for planning/updating
                 #     if isinstance(tool_output, dict):
@@ -1362,6 +1415,7 @@ async def stream_new_chat(
                         status="completed",
                         items=completed_items,
                     )
+                    await asyncio.sleep(0)
                 else:
                     yield streaming_service.format_thinking_step(
                         step_id=original_step_id,
@@ -1369,6 +1423,7 @@ async def stream_new_chat(
                         status="completed",
                         items=last_active_step_items,
                     )
+                await asyncio.sleep(0)
 
                 # Mark that we just finished a tool - "Synthesizing response" will be created
                 # when text actually starts flowing (not immediately)
@@ -1566,6 +1621,7 @@ async def stream_new_chat(
         completion_event = complete_current_step()
         if completion_event:
             yield completion_event
+            await asyncio.sleep(0)
 
         # Generate LLM title for new chats after first response
         # Check if this is the first assistant response by counting existing assistant messages
@@ -1622,11 +1678,13 @@ async def stream_new_chat(
                     yield streaming_service.format_thread_title_update(
                         chat_id, generated_title
                     )
+                    await asyncio.sleep(0)
 
         # Finish the step and message
         yield streaming_service.format_finish_step()
         yield streaming_service.format_finish()
         yield streaming_service.format_done()
+        await asyncio.sleep(0)
 
     except Exception as e:
         # Handle any errors
@@ -1642,9 +1700,11 @@ async def stream_new_chat(
             yield streaming_service.format_text_end(current_text_id)
 
         yield streaming_service.format_error(error_message)
+        await asyncio.sleep(0)
         yield streaming_service.format_finish_step()
         yield streaming_service.format_finish()
         yield streaming_service.format_done()
+        await asyncio.sleep(0)
 
     finally:
         # Clear AI responding state for live collaboration

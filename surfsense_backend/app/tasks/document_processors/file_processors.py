@@ -1671,6 +1671,9 @@ async def process_file_in_background_with_document(
     from app.services.llm_service import get_user_long_context_llm
     from app.utils.blocknote_converter import convert_markdown_to_blocknote
 
+    # Capture ID early to avoid lazy-loading issues during error handling after rollback
+    document_id = document.id
+
     try:
         markdown_content = None
         etl_service = None
@@ -1991,7 +1994,7 @@ async def process_file_in_background_with_document(
             {
                 "error_type": type(e).__name__,
                 "filename": filename,
-                "document_id": document.id,
+                "document_id": document_id,
             },
         )
         logging.error(f"Error processing file with document: {error_message}")

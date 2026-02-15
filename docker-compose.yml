@@ -62,7 +62,7 @@ services:
       - |
           set -e
           until curl -sf http://ollama:11434/api/tags >/dev/null; do sleep 1; done
-          for m in qwen3:30b-a3b qwen3:8b qllama/multilingual-e5-large-instruct:latest dengcao/Qwen3-Reranker-0.6B:Q8_0; do
+          for m in qwen3:8b qwen3:30b-a3b qllama/multilingual-e5-large-instruct:latest dengcao/Qwen3-Reranker-0.6B:Q8_0; do
             echo "Pulling $$m"
             curl -sS -X POST http://ollama:11434/api/pull -H 'Content-Type: application/json' -d "{\"name\":\"$$m\"}" >/dev/null
           done
@@ -79,12 +79,13 @@ services:
     environment:
       - OLLAMA_URL=http://ollama:11434
       # Keep these aligned with backend config to avoid runner reloads.
-      - OLLAMA_KEEPALIVE_CHAT_MODEL=${OLLAMA_KEEPALIVE_CHAT_MODEL:-qwen3:30b-a3b}
-      - OLLAMA_KEEPALIVE_CHAT_NUM_CTX=${OLLAMA_KEEPALIVE_CHAT_NUM_CTX:-8192}
-      - OLLAMA_KEEPALIVE_RERANK_MODEL=${OLLAMA_KEEPALIVE_RERANK_MODEL:-dengcao/Qwen3-Reranker-0.6B:Q8_0}
-      - OLLAMA_KEEPALIVE_RERANK_NUM_CTX=${OLLAMA_KEEPALIVE_RERANK_NUM_CTX:-2048}
-      - OLLAMA_KEEPALIVE_DURATION=${OLLAMA_KEEPALIVE_DURATION:-2h}
-      - OLLAMA_KEEPALIVE_REFRESH_SECS=${OLLAMA_KEEPALIVE_REFRESH_SECS:-3600}
+      # Hardcode to avoid accidentally inheriting host env overrides.
+      - OLLAMA_KEEPALIVE_CHAT_MODEL=qwen3:30b-a3b
+      - OLLAMA_KEEPALIVE_CHAT_NUM_CTX=32768
+      - OLLAMA_KEEPALIVE_RERANK_MODEL=dengcao/Qwen3-Reranker-0.6B:Q8_0
+      - OLLAMA_KEEPALIVE_RERANK_NUM_CTX=2048
+      - OLLAMA_KEEPALIVE_DURATION=2h
+      - OLLAMA_KEEPALIVE_REFRESH_SECS=3600
     volumes:
       - ./scripts/ollama_keepalive.sh:/scripts/ollama_keepalive.sh:ro
     restart: unless-stopped
@@ -92,8 +93,6 @@ services:
   backend:
     build: ./surfsense_backend
     # image: ghcr.io/modsetter/surfsense_backend:latest
-    # Enable NVIDIA GPU access (requires NVIDIA Container Toolkit on the host)
-    gpus: all
     ports:
       - "${BACKEND_PORT:-8000}:8000"
     volumes:

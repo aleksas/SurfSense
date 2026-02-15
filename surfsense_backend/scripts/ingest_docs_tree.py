@@ -122,16 +122,14 @@ async def ingest(
     async with async_session_maker() as session:
         # Silence SentenceTransformer encode() progress bars for bulk runs.
         from app.config import config as app_config
-
         try:
-            st_model = app_config.embedding_model_instance.model
-
-            def _quiet_embed(text: str):
-                return st_model.encode(  # type: ignore[attr-defined]
-                    text, convert_to_numpy=True, show_progress_bar=False
-                )
-
-            app_config.embedding_model_instance.embed = _quiet_embed  # type: ignore[assignment]
+            st_model = getattr(app_config.embedding_model_instance, "model", None)
+            if st_model and hasattr(st_model, "encode"):
+                def _quiet_embed(text: str):
+                    return st_model.encode(
+                        text, convert_to_numpy=True, show_progress_bar=False
+                    )
+                app_config.embedding_model_instance.embed = _quiet_embed
         except Exception:
             pass
 
@@ -223,6 +221,7 @@ async def ingest(
             tmp_path = tmp_dir / f"{document.id}_{src.name}"
             try:
                 shutil.copyfile(src, tmp_path)
+                
                 await process_file_in_background_with_document(
                     document=document,
                     file_path=str(tmp_path),
@@ -289,8 +288,8 @@ def main() -> None:
     if not extensions:
         raise SystemExit("No extensions configured. Example: --extensions .md,.pdf")
 
-    raise SystemExit(
-        asyncio.run(
+    try:
+        exit_code = asyncio.run(
             ingest(
                 email=args.email,
                 folder=folder,
@@ -302,7 +301,9 @@ def main() -> None:
                 reindex_existing=args.reindex_existing,
             )
         )
-    )
+        raise SystemExit(exit_code)
+    except KeyboardInterrupt:
+        raise SystemExit(130)
 
 
 if __name__ == "__main__":

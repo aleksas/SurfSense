@@ -10,6 +10,7 @@ import { useQueryClient } from "@tanstack/react-query";
 import { useAtomValue, useSetAtom } from "jotai";
 import { useParams, useSearchParams } from "next/navigation";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { flushSync } from "react-dom";
 import { toast } from "sonner";
 import { z } from "zod";
 import {
@@ -671,6 +672,36 @@ export default function NewChatPage() {
 				},
 			]);
 
+			// React 18/19 can batch state updates across async boundaries.
+			// During SSE streaming this can make the UI appear "stuck" until the
+			// async handler returns. We coalesce updates and force a sync flush per
+			// animation frame so thinking steps + deltas render while streaming.
+			let uiFlushQueued = false;
+			const queueUiFlush = () => {
+				if (uiFlushQueued) return;
+				uiFlushQueued = true;
+				requestAnimationFrame(() => {
+					uiFlushQueued = false;
+					flushSync(() => {
+						setMessages((prev) =>
+							prev.map((m) =>
+								m.id === assistantMsgId ? { ...m, content: buildContentForUI() } : m
+							)
+						);
+						setMessageThinkingSteps((prev) => {
+							const steps = Array.from(currentThinkingSteps.values());
+							const newMap = new Map(prev);
+							if (steps.length > 0) {
+								newMap.set(assistantMsgId, steps);
+							} else {
+								newMap.delete(assistantMsgId);
+							}
+							return newMap;
+						});
+					});
+				});
+			};
+
 			try {
 				const { BACKEND_URL: backendUrl } = await import("@/lib/env-config");
 
@@ -757,41 +788,29 @@ export default function NewChatPage() {
 									const parsed = JSON.parse(data);
 
 									switch (parsed.type) {
-										case "text-delta":
-											appendText(parsed.delta);
-											setMessages((prev) =>
-												prev.map((m) =>
-													m.id === assistantMsgId ? { ...m, content: buildContentForUI() } : m
-												)
-											);
-											break;
+									case "text-delta":
+										appendText(parsed.delta);
+										queueUiFlush();
+										break;
 
-										case "tool-input-start":
-											// Add tool call inline - this breaks the current text segment
-											addToolCall(parsed.toolCallId, parsed.toolName, {});
-											setMessages((prev) =>
-												prev.map((m) =>
-													m.id === assistantMsgId ? { ...m, content: buildContentForUI() } : m
-												)
-											);
-											break;
+									case "tool-input-start":
+										// Add tool call inline - this breaks the current text segment
+										addToolCall(parsed.toolCallId, parsed.toolName, {});
+										queueUiFlush();
+										break;
 
-										case "tool-input-available": {
-											// Update existing tool call's args, or add if not exists
-											if (toolCallIndices.has(parsed.toolCallId)) {
-												updateToolCall(parsed.toolCallId, { args: parsed.input || {} });
-											} else {
-												addToolCall(parsed.toolCallId, parsed.toolName, parsed.input || {});
-											}
-											setMessages((prev) =>
-												prev.map((m) =>
-													m.id === assistantMsgId ? { ...m, content: buildContentForUI() } : m
-												)
-											);
-											break;
+									case "tool-input-available": {
+										// Update existing tool call's args, or add if not exists
+										if (toolCallIndices.has(parsed.toolCallId)) {
+											updateToolCall(parsed.toolCallId, { args: parsed.input || {} });
+										} else {
+											addToolCall(parsed.toolCallId, parsed.toolName, parsed.input || {});
 										}
+										queueUiFlush();
+										break;
+									}
 
-										case "tool-output-available": {
+									case "tool-output-available": {
 											// Update the tool call with its result
 											updateToolCall(parsed.toolCallId, { result: parsed.output });
 											// Handle podcast-specific logic
@@ -805,27 +824,16 @@ export default function NewChatPage() {
 													}
 												}
 											}
-											setMessages((prev) =>
-												prev.map((m) =>
-													m.id === assistantMsgId ? { ...m, content: buildContentForUI() } : m
-												)
-											);
-											break;
-										}
+										queueUiFlush();
+										break;
+									}
 
-										case "data-thinking-step": {
+									case "data-thinking-step": {
 											// Handle thinking step events for chain-of-thought display
 											const stepData = parsed.data as ThinkingStepData;
 											if (stepData?.id) {
 												currentThinkingSteps.set(stepData.id, stepData);
-												// Update thinking steps state for rendering
-												// The ThinkingStepsScrollHandler in Thread component
-												// will handle auto-scrolling when this state changes
-												setMessageThinkingSteps((prev) => {
-													const newMap = new Map(prev);
-													newMap.set(assistantMsgId, Array.from(currentThinkingSteps.values()));
-													return newMap;
-												});
+												queueUiFlush();
 											}
 											break;
 										}

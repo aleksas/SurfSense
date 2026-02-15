@@ -1,3 +1,4 @@
+import asyncio
 import hashlib
 import os
 from functools import lru_cache
@@ -224,7 +225,9 @@ async def generate_document_summary(
     else:
         enhanced_summary_content = summary_content
 
-    summary_embedding = config.embedding_model_instance.embed(enhanced_summary_content)
+    summary_embedding = await asyncio.to_thread(
+        config.embedding_model_instance.embed, enhanced_summary_content
+    )
 
     return enhanced_summary_content, summary_embedding
 
@@ -257,16 +260,24 @@ async def create_document_chunks(content: str) -> list[Chunk]:
         try:
             for i in range(0, len(chunk_texts), batch_size):
                 batch_texts = chunk_texts[i : i + batch_size]
-                batch_vectors = embedding_model.embed_batch(batch_texts)
+                batch_vectors = await asyncio.to_thread(
+                    embedding_model.embed_batch, batch_texts
+                )
                 if len(batch_vectors) != len(batch_texts):
                     raise ValueError(
                         "embed_batch returned mismatched vector count; falling back"
                     )
                 chunk_embeddings.extend(batch_vectors)
         except Exception:
-            chunk_embeddings = [embedding_model.embed(text) for text in chunk_texts]
+            for text in chunk_texts:
+                chunk_embeddings.append(
+                    await asyncio.to_thread(embedding_model.embed, text)
+                )
     else:
-        chunk_embeddings = [embedding_model.embed(text) for text in chunk_texts]
+        for text in chunk_texts:
+            chunk_embeddings.append(
+                await asyncio.to_thread(embedding_model.embed, text)
+            )
 
     return [
         Chunk(

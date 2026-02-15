@@ -1719,6 +1719,7 @@ engine = create_async_engine(
     # connections before use and recycling long-lived idle connections.
     pool_pre_ping=True,
     pool_recycle=1800,
+    echo=False,
 )
 async_session_maker = async_sessionmaker(engine, expire_on_commit=False)
 
