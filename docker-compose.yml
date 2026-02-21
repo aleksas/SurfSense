@@ -43,30 +43,13 @@ services:
     gpus: all
     environment:
       # Keep the last-loaded model in memory longer to avoid repeated 15-60s cold loads.
-      - OLLAMA_KEEP_ALIVE=${OLLAMA_KEEP_ALIVE:-30m}
+      - OLLAMA_KEEP_ALIVE=-1
       # Avoid loading multiple large models concurrently on a single GPU.
       - OLLAMA_MAX_LOADED_MODELS=${OLLAMA_MAX_LOADED_MODELS:-4}
       - OLLAMA_NUM_PARALLEL=${OLLAMA_NUM_PARALLEL:-1}
     volumes:
       - ollama_data:/root/.ollama
     restart: unless-stopped
-
-  # Best-effort pre-pull of chat + ingestion-summary models used in this project.
-  # Comment this out if you prefer to pull models manually.
-  ollama_init:
-    image: curlimages/curl:latest
-    depends_on:
-      - ollama
-    entrypoint: ["/bin/sh", "-lc"]
-    command:
-      - |
-          set -e
-          until curl -sf http://ollama:11434/api/tags >/dev/null; do sleep 1; done
-          for m in qwen3:8b qwen3:30b-a3b qllama/multilingual-e5-large-instruct:latest dengcao/Qwen3-Reranker-0.6B:Q8_0; do
-            echo "Pulling $$m"
-            curl -sS -X POST http://ollama:11434/api/pull -H 'Content-Type: application/json' -d "{\"name\":\"$$m\"}" >/dev/null
-          done
-    restart: "no"
 
   # Periodically pings key models so they stay warm in Ollama.
   # This is intentionally a separate container so it can be restarted independently.
@@ -120,15 +103,16 @@ services:
       - LANGSMITH_TRACING=false
       - ELECTRIC_DB_USER=${ELECTRIC_DB_USER:-electric}
       - ELECTRIC_DB_PASSWORD=${ELECTRIC_DB_PASSWORD:-electric_password}
-      - NEXT_FRONTEND_URL=${NEXT_FRONTEND_URL:-http://localhost:3000}
+      - NEXT_FRONTEND_URL=${NEXT_FRONTEND_URL:-http://frontend:3000}
       # Disable self-serve signups for this deployment (UI link is also hidden).
-      - REGISTRATION_ENABLED=${REGISTRATION_ENABLED:-FALSE}
+      - REGISTRATION_ENABLED=TRUE
+      - SURFSENSE_DISABLE_INGEST_SUMMARY=TRUE
       # Ollama request timeouts: large models can take >30s to cold-load.
       - SURFSENSE_OLLAMA_REQUEST_TIMEOUT=${SURFSENSE_OLLAMA_REQUEST_TIMEOUT:-180}
       # Chat grounding: run a backend pre-search over FILE docs and return matches directly for
       # lookup-style queries ("Find/Show/Quote/Which post"). This avoids local-model tool-calling
       # failures and makes chat return exact ingested content.
-      - SURFSENSE_CHAT_PRESEARCH_ENABLED=${SURFSENSE_CHAT_PRESEARCH_ENABLED:-TRUE}
+      - SURFSENSE_CHAT_PRESEARCH_ENABLED=TRUE
       - SURFSENSE_CHAT_LOOKUP_BYPASS=${SURFSENSE_CHAT_LOOKUP_BYPASS:-TRUE}
       - SURFSENSE_CHAT_PRESEARCH_TOP_K=${SURFSENSE_CHAT_PRESEARCH_TOP_K:-8}
       - SURFSENSE_CHAT_PRESEARCH_MAX_DOCS=${SURFSENSE_CHAT_PRESEARCH_MAX_DOCS:-3}
@@ -137,61 +121,6 @@ services:
       - db
       - redis
       - ollama
-
-  # Run these services separately in production
-  # celery_worker:
-  #   build: ./surfsense_backend
-  #   # image: ghcr.io/modsetter/surfsense_backend:latest
-  #   command: celery -A app.celery_app worker --loglevel=info --concurrency=1 --pool=solo
-  #   volumes:
-  #     - ./surfsense_backend:/app
-  #     - shared_temp:/tmp
-  #   env_file:
-  #     - ./surfsense_backend/.env
-  #   environment:
-  #     - DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@db:5432/${POSTGRES_DB:-surfsense}
-  #     - CELERY_BROKER_URL=redis://redis:${REDIS_PORT:-6379}/0
-  #     - CELERY_RESULT_BACKEND=redis://redis:${REDIS_PORT:-6379}/0
-  #     - PYTHONPATH=/app
-  #   depends_on:
-  #     - db
-  #     - redis
-  #     - backend
-
-  # celery_beat:
-  #   build: ./surfsense_backend
-  #   # image: ghcr.io/modsetter/surfsense_backend:latest
-  #   command: celery -A app.celery_app beat --loglevel=info
-  #   volumes:
-  #     - ./surfsense_backend:/app
-  #     - shared_temp:/tmp
-  #   env_file:
-  #     - ./surfsense_backend/.env
-  #   environment:
-  #     - DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@db:5432/${POSTGRES_DB:-surfsense}
-  #     - CELERY_BROKER_URL=redis://redis:${REDIS_PORT:-6379}/0
-  #     - CELERY_RESULT_BACKEND=redis://redis:${REDIS_PORT:-6379}/0
-  #     - PYTHONPATH=/app
-  #   depends_on:
-  #     - db
-  #     - redis
-  #     - celery_worker
-
-  # flower:
-  #   build: ./surfsense_backend
-  #   # image: ghcr.io/modsetter/surfsense_backend:latest
-  #   command: celery -A app.celery_app flower --port=5555
-  #   ports:
-  #     - "${FLOWER_PORT:-5555}:5555"
-  #   env_file:
-  #     - ./surfsense_backend/.env
-  #   environment:
-  #     - CELERY_BROKER_URL=redis://redis:${REDIS_PORT:-6379}/0
-  #     - CELERY_RESULT_BACKEND=redis://redis:${REDIS_PORT:-6379}/0
-  #     - PYTHONPATH=/app
-  #   depends_on:
-  #     - redis
-  #     - celery_worker
 
   electric:
     image: electricsql/electric:latest
@@ -230,6 +159,26 @@ services:
       - backend
       - electric
 
+  sync-agent:
+    build: ./surfsense_backend
+    command: python /app/scripts/sync_loop.py
+    volumes:
+      - ./surfsense_backend/app:/app/app
+      - ./surfsense_backend/scripts:/app/scripts
+      - /mnt/data/surfsense/docs:/ingest/docs
+    env_file:
+      - ./surfsense_backend/.env
+    environment:
+      - DOCS_ROOT=/ingest/docs
+      - SYNC_INTERVAL_HOURS=24
+      - SEARCH_SPACE_ID=5
+      - USER_EMAIL=ant.kampo@gmail.com
+      - SURFSENSE_DISABLE_INGEST_SUMMARY=TRUE
+      - PYTHONPATH=/app
+      - DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@db:5432/${POSTGRES_DB:-surfsense}
+    depends_on:
+      - backend
+
   cloudflared:
     image: cloudflare/cloudflared:latest
     command: tunnel --no-autoupdate --url http://frontend:3000
@@ -237,9 +186,21 @@ services:
     depends_on:
       - frontend
 
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.17.0
+    environment:
+      - discovery.type=single-node
+      - xpack.security.enabled=false
+      - "ES_JAVA_OPTS=-Xms512m -Xmx512m"
+    ports:
+      - "9200:9200"
+    volumes:
+      - es_data:/usr/share/elasticsearch/data
+
 volumes:
   postgres_data:
   pgadmin_data:
   redis_data:
   shared_temp:
   ollama_data:
+  es_data:

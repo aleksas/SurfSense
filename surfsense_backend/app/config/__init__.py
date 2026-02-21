@@ -132,6 +132,16 @@ class JinaV3SentenceTransformerEmbeddings:
         model_kwargs: dict[str, Any] = {"trust_remote_code": trust_remote_code}
         if device:
             model_kwargs["device"] = device
+            # Check for thread restriction (especially important when sharing GPU with LLM)
+            try:
+                import torch
+                num_threads = int(os.getenv("EMBEDDING_NUM_THREADS", "0"))
+                if num_threads > 0:
+                    torch.set_num_threads(num_threads)
+                    import logging
+                    logging.info(f"Embedding thread limit set to: {num_threads}")
+            except Exception:
+                pass
 
         self.model = SentenceTransformer(model_name, **model_kwargs)
         if max_seq_length > 0:
@@ -706,7 +716,7 @@ class Config:
     try:
         import torch
 
-        if torch.cuda.is_available():
+        if torch.cuda.is_available() and os.getenv("EMBEDDING_DEVICE", "cpu").lower() == "cuda":
             st_model = getattr(embedding_model_instance, "model", None)
             if st_model is not None and hasattr(st_model, "to"):
                 st_model.to("cuda")

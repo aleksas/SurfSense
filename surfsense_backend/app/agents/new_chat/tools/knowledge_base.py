@@ -365,9 +365,26 @@ async def search_knowledge_base_async(
         end_date=end_date,
     )
 
-    connectors = _normalize_connectors(connectors_to_search, available_connectors)
+    # Prioritize local investigative sources
+    ordered_connectors = []
 
-    for connector in connectors:
+    # Get the list of connectors to search
+    connectors = available_connectors or connectors_to_search or []
+    
+    # 1. First, check our high-precision structured data (Elasticsearch)
+    if "ELASTICSEARCH_CONNECTOR" in connectors:
+        ordered_connectors.append("ELASTICSEARCH_CONNECTOR")
+    
+    # 2. Second, check our local unified company records (FILE)
+    if "FILE" in connectors:
+        ordered_connectors.append("FILE")
+        
+    # 3. Then add the rest of the requested connectors
+    for c in connectors:
+        if c not in ordered_connectors:
+            ordered_connectors.append(c)
+
+    for connector in ordered_connectors:
         try:
             if connector == "YOUTUBE_VIDEO":
                 _, chunks = await connector_service.search_youtube(

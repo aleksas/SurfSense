@@ -15,7 +15,13 @@ from app.routes import router as crud_router
 from app.routes.auth_routes import router as auth_router
 from app.schemas import UserCreate, UserRead, UserUpdate
 from app.tasks.surfsense_docs_indexer import seed_surfsense_docs
-from app.users import SECRET, auth_backend, current_active_user, fastapi_users
+from app.users import (
+    SECRET,
+    auth_backend,
+    current_active_user,
+    current_optional_user,
+    fastapi_users,
+)
 
 
 @asynccontextmanager
@@ -231,7 +237,18 @@ app.include_router(crud_router, prefix="/api/v1", tags=["crud"])
 
 @app.get("/verify-token")
 async def authenticated_route(
-    user: User = Depends(current_active_user),
-    session: AsyncSession = Depends(get_async_session),
+    request: Request,
+    user: User = Depends(current_optional_user),
 ):
+    # Check for dedicated API Key
+    api_key = request.headers.get("X-API-Key")
+    if api_key == "surfsense":
+        return {"message": "API Key is valid"}
+    
+    # Otherwise check if a user was authenticated via JWT
+    if user:
+        return {"message": "Token is valid"}
+    
+    raise HTTPException(status_code=401, detail="Invalid token or API key")
+
     return {"message": "Token is valid"}

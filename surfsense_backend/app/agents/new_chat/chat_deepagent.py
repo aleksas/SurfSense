@@ -205,27 +205,41 @@ async def create_surfsense_deep_agent(
     """
     # Discover available connectors and document types for this search space
     # This enables dynamic tool docstrings that inform the LLM about what's actually available
-    available_connectors: list[str] | None = None
-    available_document_types: list[str] | None = None
+    available_connectors: list[str] = []
+    available_document_types: list[str] = []
 
     try:
+        # Get document types that have at least one document indexed
+        doc_type_enums = await connector_service.get_available_document_types(
+            search_space_id
+        )
+        # Clean up enum strings (e.g. "DocumentType.FILE" -> "FILE")
+        available_document_types = [
+            dt.value if hasattr(dt, "value") else str(dt).split(".")[-1]
+            for dt in doc_type_enums
+        ]
+
         # Get enabled search source connectors for this search space
         connector_types = await connector_service.get_available_connectors(
             search_space_id
         )
-        if connector_types:
-            # Convert enum values to strings and also include mapped document types
-            available_connectors = _map_connectors_to_searchable_types(connector_types)
+        # Map connectors to searchable types
+        available_connectors = _map_connectors_to_searchable_types(connector_types or [])
+        
+        # IMPORTANT: If no connectors are configured, but we have documents,
+        # ensure the document types are in available_connectors so the tool
+        # doesn't fall back to a slow "search everything" sequential loop.
+        for dt in available_document_types:
+            if dt not in available_connectors:
+                available_connectors.append(dt)
 
-        # Get document types that have at least one document indexed
-        available_document_types = await connector_service.get_available_document_types(
-            search_space_id
-        )
     except Exception as e:
         # Log but don't fail - fall back to all connectors if discovery fails
         import logging
 
         logging.warning(f"Failed to discover available connectors/document types: {e}")
+        available_connectors = None
+        available_document_types = None
 
     # Build dependencies dict for the tools registry
     dependencies = {

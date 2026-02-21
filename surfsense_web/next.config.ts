@@ -46,6 +46,7 @@ const nextConfig: NextConfig = {
 			{ source: "/auth/:path*", destination: `${backend}/auth/:path*` },
 			{ source: "/users/:path*", destination: `${backend}/users/:path*` },
 			{ source: "/api/:path*", destination: `${backend}/api/:path*` },
+			{ source: "/verify-token", destination: `${backend}/verify-token` },
 			// Avoid clobbering the frontend docs route at /docs
 			{ source: "/openapi.json", destination: `${backend}/openapi.json` },
 			{ source: "/redoc", destination: `${backend}/redoc` },

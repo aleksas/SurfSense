@@ -1,0 +1,29 @@
+`torch_dtype` is deprecated! Use `dtype` instead!
+`torch_dtype` is deprecated! Use `dtype` instead!
+flash_attn is not installed. Using PyTorch native attention implementation.
+flash_attn is not installed. Using PyTorch native attention implementation.
+flash_attn is not installed. Using PyTorch native attention implementation.
+flash_attn is not installed. Using PyTorch native attention implementation.
+flash_attn is not installed. Using PyTorch native attention implementation.
+flash_attn is not installed. Using PyTorch native attention implementation.
+flash_attn is not installed. Using PyTorch native attention implementation.
+flash_attn is not installed. Using PyTorch native attention implementation.
+flash_attn is not installed. Using PyTorch native attention implementation.
+flash_attn is not installed. Using PyTorch native attention implementation.
+flash_attn is not installed. Using PyTorch native attention implementation.
+flash_attn is not installed. Using PyTorch native attention implementation.
+flash_attn is not installed. Using PyTorch native attention implementation.
+flash_attn is not installed. Using PyTorch native attention implementation.
+flash_attn is not installed. Using PyTorch native attention implementation.
+flash_attn is not installed. Using PyTorch native attention implementation.
+flash_attn is not installed. Using PyTorch native attention implementation.
+flash_attn is not installed. Using PyTorch native attention implementation.
+flash_attn is not installed. Using PyTorch native attention implementation.
+flash_attn is not installed. Using PyTorch native attention implementation.
+flash_attn is not installed. Using PyTorch native attention implementation.
+flash_attn is not installed. Using PyTorch native attention implementation.
+flash_attn is not installed. Using PyTorch native attention implementation.
+flash_attn is not installed. Using PyTorch native attention implementation.
+flash_attn is not installed. Using PyTorch native attention implementation.
+/usr/local/lib/python3.12/site-packages/chonkie/chunker/code.py:76: UserWarning: The language is set to `auto`. This would adversely affect the performance of the chunker. Consider setting the `language` parameter to a specific language to improve performance.
+  warnings.warn(

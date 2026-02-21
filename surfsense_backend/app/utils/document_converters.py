@@ -193,20 +193,27 @@ async def generate_document_summary(
     Returns:
         Tuple of (enhanced_summary_content, summary_embedding)
     """
-    summary_llm = resolve_ingestion_summary_llm(user_llm)
+    # Check for bypass flag to speed up ingestion of structured records (e.g. table rows)
+    disable_summary = os.getenv("SURFSENSE_DISABLE_INGEST_SUMMARY", "FALSE").upper() == "TRUE"
+    
+    if disable_summary:
+        # Fast bypass: use truncated content as summary
+        summary_content = content[:1000]
+    else:
+        summary_llm = resolve_ingestion_summary_llm(user_llm)
 
-    # Get model name from summary llm for token counting
-    model_name = getattr(summary_llm, "model", "gpt-3.5-turbo")  # Fallback to default
+        # Get model name from summary llm for token counting
+        model_name = getattr(summary_llm, "model", "gpt-3.5-turbo")  # Fallback to default
 
-    # Optimize content to fit within context window
-    optimized_content = optimize_content_for_context_window(
-        content, document_metadata, model_name
-    )
+        # Optimize content to fit within context window
+        optimized_content = optimize_content_for_context_window(
+            content, document_metadata, model_name
+        )
 
-    summary_chain = SUMMARY_PROMPT_TEMPLATE | summary_llm
-    content_with_metadata = f"<DOCUMENT><DOCUMENT_METADATA>\n\n{document_metadata}\n\n</DOCUMENT_METADATA>\n\n<DOCUMENT_CONTENT>\n\n{optimized_content}\n\n</DOCUMENT_CONTENT></DOCUMENT>"
-    summary_result = await summary_chain.ainvoke({"document": content_with_metadata})
-    summary_content = summary_result.content
+        summary_chain = SUMMARY_PROMPT_TEMPLATE | summary_llm
+        content_with_metadata = f"<DOCUMENT><DOCUMENT_METADATA>\n\n{document_metadata}\n\n</DOCUMENT_METADATA>\n\n<DOCUMENT_CONTENT>\n\n{optimized_content}\n\n</DOCUMENT_CONTENT></DOCUMENT>"
+        summary_result = await summary_chain.ainvoke({"document": content_with_metadata})
+        summary_content = summary_result.content
 
     # Combine summary with metadata if provided
     if document_metadata:

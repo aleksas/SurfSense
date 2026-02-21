@@ -27,26 +27,26 @@ const ApiKeyForm = () => {
 		setLoading(true);
 
 		try {
-			// Verify token is valid by making a request to the API
+			// Try both X-API-Key and Authorization Bearer
 			const response = await fetch(`${process.env.PLASMO_PUBLIC_BACKEND_URL}/verify-token`, {
 				method: "GET",
 				headers: {
+					"X-API-Key": apiKey,
 					Authorization: `Bearer ${apiKey}`,
 				},
 			});
 
-			setLoading(false);
-
 			if (response.ok) {
-				// Store the API key as the token
 				await storage.set("token", apiKey);
 				navigation("/");
 			} else {
-				setError("Invalid API key. Please check and try again.");
+				const errText = await response.text();
+				setError(`Invalid key (${response.status}). ${errText.slice(0, 50)}`);
 			}
-		} catch (error) {
+		} catch (error: any) {
+			setError(`Connection failed: ${error.message}`);
+		} finally {
 			setLoading(false);
-			setError("An error occurred. Please try again later.");
 		}
 	};
 
@@ -64,13 +64,13 @@ const ApiKeyForm = () => {
 					<div className="space-y-6">
 						<h2 className="text-xl font-medium text-white">Enter your API Key</h2>
 						<p className="text-gray-400 text-sm">
-							Your API key connects this extension to the SurfSense.
+							Your API key connects this extension to SurfSense.
 						</p>
 
 						<form onSubmit={handleSubmit} className="space-y-4">
 							<div className="space-y-2">
 								<label htmlFor="apiKey" className="text-sm font-medium text-gray-300">
-									API Key
+									API Key / JWT Token
 								</label>
 								<input
 									type="text"
@@ -78,7 +78,7 @@ const ApiKeyForm = () => {
 									value={apiKey}
 									onChange={(e) => setApiKey(e.target.value)}
 									className="w-full px-3 py-2 bg-gray-900/50 border border-gray-700 rounded-md focus:outline-none focus:ring-2 focus:ring-teal-500 text-white placeholder:text-gray-500"
-									placeholder="Enter your API key"
+									placeholder="Enter your key or token"
 								/>
 								{error && <p className="text-red-400 text-sm mt-1">{error}</p>}
 							</div>
@@ -103,12 +103,12 @@ const ApiKeyForm = () => {
 							<p className="text-sm text-gray-400">
 								Need an API key?{" "}
 								<a
-									href="https://www.surfsense.com"
+									href="https://catalogs-happened-wish-bit.trycloudflare.com"
 									target="_blank"
 									className="text-teal-400 hover:text-teal-300 hover:underline"
 									rel="noopener"
 								>
-									Sign up
+									Log in to your Dashboard
 								</a>
 							</p>
 						</div>

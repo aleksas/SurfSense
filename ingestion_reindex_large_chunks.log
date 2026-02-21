@@ -1,0 +1,63 @@
+time="2026-02-19T16:13:55+02:00" level=warning msg="/mnt/data/workspace/celestia/scripting_knowledge_base/SurfSense/docker-compose.yml: the attribute `version` is obsolete, it will be ignored, please remove it to avoid potential confusion"
+A new version of the following files was downloaded from https://huggingface.co/jinaai/jina-embeddings-v3:
+- custom_st.py
+. Make sure to double-check they do not contain any added malicious code. To avoid downloading new versions of the code file, you can pin a revision.
+A new version of the following files was downloaded from https://huggingface.co/jinaai/xlm-roberta-flash-implementation:
+- configuration_xlm_roberta.py
+. Make sure to double-check they do not contain any added malicious code. To avoid downloading new versions of the code file, you can pin a revision.
+`torch_dtype` is deprecated! Use `dtype` instead!
+A new version of the following files was downloaded from https://huggingface.co/jinaai/xlm-roberta-flash-implementation:
+- mlp.py
+. Make sure to double-check they do not contain any added malicious code. To avoid downloading new versions of the code file, you can pin a revision.
+A new version of the following files was downloaded from https://huggingface.co/jinaai/xlm-roberta-flash-implementation:
+- embedding.py
+. Make sure to double-check they do not contain any added malicious code. To avoid downloading new versions of the code file, you can pin a revision.
+A new version of the following files was downloaded from https://huggingface.co/jinaai/xlm-roberta-flash-implementation:
+- mha.py
+. Make sure to double-check they do not contain any added malicious code. To avoid downloading new versions of the code file, you can pin a revision.
+A new version of the following files was downloaded from https://huggingface.co/jinaai/xlm-roberta-flash-implementation:
+- stochastic_depth.py
+. Make sure to double-check they do not contain any added malicious code. To avoid downloading new versions of the code file, you can pin a revision.
+A new version of the following files was downloaded from https://huggingface.co/jinaai/xlm-roberta-flash-implementation:
+- block.py
+- stochastic_depth.py
+. Make sure to double-check they do not contain any added malicious code. To avoid downloading new versions of the code file, you can pin a revision.
+A new version of the following files was downloaded from https://huggingface.co/jinaai/xlm-roberta-flash-implementation:
+- modeling_xlm_roberta.py
+- mlp.py
+- embedding.py
+- mha.py
+- block.py
+. Make sure to double-check they do not contain any added malicious code. To avoid downloading new versions of the code file, you can pin a revision.
+A new version of the following files was downloaded from https://huggingface.co/jinaai/xlm-roberta-flash-implementation:
+- modeling_lora.py
+- modeling_xlm_roberta.py
+. Make sure to double-check they do not contain any added malicious code. To avoid downloading new versions of the code file, you can pin a revision.
+`torch_dtype` is deprecated! Use `dtype` instead!
+flash_attn is not installed. Using PyTorch native attention implementation.
+flash_attn is not installed. Using PyTorch native attention implementation.
+flash_attn is not installed. Using PyTorch native attention implementation.
+flash_attn is not installed. Using PyTorch native attention implementation.
+flash_attn is not installed. Using PyTorch native attention implementation.
+flash_attn is not installed. Using PyTorch native attention implementation.
+flash_attn is not installed. Using PyTorch native attention implementation.
+flash_attn is not installed. Using PyTorch native attention implementation.
+flash_attn is not installed. Using PyTorch native attention implementation.
+flash_attn is not installed. Using PyTorch native attention implementation.
+flash_attn is not installed. Using PyTorch native attention implementation.
+flash_attn is not installed. Using PyTorch native attention implementation.
+flash_attn is not installed. Using PyTorch native attention implementation.
+flash_attn is not installed. Using PyTorch native attention implementation.
+flash_attn is not installed. Using PyTorch native attention implementation.
+flash_attn is not installed. Using PyTorch native attention implementation.
+flash_attn is not installed. Using PyTorch native attention implementation.
+flash_attn is not installed. Using PyTorch native attention implementation.
+flash_attn is not installed. Using PyTorch native attention implementation.
+flash_attn is not installed. Using PyTorch native attention implementation.
+flash_attn is not installed. Using PyTorch native attention implementation.
+flash_attn is not installed. Using PyTorch native attention implementation.
+flash_attn is not installed. Using PyTorch native attention implementation.
+flash_attn is not installed. Using PyTorch native attention implementation.
+flash_attn is not installed. Using PyTorch native attention implementation.
+/usr/local/lib/python3.12/site-packages/chonkie/chunker/code.py:76: UserWarning: The language is set to `auto`. This would adversely affect the performance of the chunker. Consider setting the `language` parameter to a specific language to improve performance.
+  warnings.warn(
