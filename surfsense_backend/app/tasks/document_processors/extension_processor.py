@@ -3,6 +3,8 @@ Extension document processor for SurfSense browser extension.
 """
 
 import logging
+import re
+from html import unescape
 
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -22,6 +24,90 @@ from .base import (
     check_document_by_unique_identifier,
     get_current_timestamp,
 )
+
+_HTML_TAG_PATTERN = re.compile(r"</?[a-zA-Z][^>]{0,200}>")
+_HTML_COMMENT_PATTERN = re.compile(r"<!--.*?-->", re.DOTALL)
+_IMAGE_ONLY_LINK_PATTERN = re.compile(
+    r"^\s*(?:!\[.*?\]\(.*?\)|\[!\[.*?\]\(.*?\)\]\(.*?\))\s*$"
+)
+_STANDALONE_LINK_LINE_PATTERN = re.compile(r"^\s*\[[^\]]{1,80}\]\(https?://[^)]+\)\s*$")
+_BOILERPLATE_SECTION_HEADERS = (
+    "## latest news",
+    "### latest news",
+    "## we also recommend",
+    "### we also recommend",
+    "we also recommend",
+    "## map",
+    "### map",
+)
+_TRACKING_MARKERS = (
+    "smartadserver.com",
+    "creatives.sascdn.com",
+    "gdpr_consent=",
+    "utm_campaign=",
+    "opdt=",
+    "reqid=",
+    "go=https",
+)
+
+
+def _strip_markdown_boilerplate(text: str) -> str:
+    """Drop common navigation/ads/footer boilerplate from markdown-like page dumps."""
+    out: list[str] = []
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        low = line.lower()
+
+        if low in _BOILERPLATE_SECTION_HEADERS:
+            break
+        if any(marker in low for marker in _TRACKING_MARKERS):
+            continue
+        if low.startswith("[show map]("):
+            continue
+        if _IMAGE_ONLY_LINK_PATTERN.match(line):
+            continue
+        if _STANDALONE_LINK_LINE_PATTERN.match(line):
+            continue
+        if line.count("](") >= 6 and len(line) > 240:
+            continue
+
+        out.append(raw_line)
+
+    cleaned = "\n".join(out).strip()
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
+    return cleaned
+
+
+def normalize_extension_page_content(raw_content: str) -> str:
+    """
+    Normalize extension page content to markdown/plain text for indexing.
+
+    Extension captures may include raw HTML depending on source page/extractor.
+    This keeps chunks clean for lexical/vector search and chat rendering.
+    """
+    text = (raw_content or "").strip()
+    if not text:
+        return ""
+
+    text = _HTML_COMMENT_PATTERN.sub(" ", text)
+    sample = text[:4000].lower()
+    looks_like_html = "<!doctype html" in sample or _HTML_TAG_PATTERN.search(sample)
+
+    if looks_like_html:
+        try:
+            from markdownify import markdownify
+
+            text = markdownify(text, heading_style="ATX", strip=["script", "style"])
+        except Exception:
+            # Fallback to simple tag stripping if markdown conversion fails.
+            text = re.sub(r"<[^>]+>", " ", text)
+
+    text = unescape(text)
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    text = re.sub(r"[ \t]{2,}", " ", text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    text = _strip_markdown_boilerplate(text)
+    return text.strip()
 
 
 async def add_extension_received_document(
@@ -57,6 +143,10 @@ async def add_extension_received_document(
     )
 
     try:
+        normalized_page_content = normalize_extension_page_content(content.pageContent)
+        if not normalized_page_content:
+            normalized_page_content = (content.pageContent or "").strip()
+
         # Format document metadata in a more maintainable way
         metadata_sections = [
             (
@@ -72,7 +162,7 @@ async def add_extension_received_document(
             ),
             (
                 "CONTENT",
-                ["FORMAT: markdown", "TEXT_START", content.pageContent, "TEXT_END"],
+                ["FORMAT: markdown", "TEXT_START", normalized_page_content, "TEXT_END"],
             ),
         ]
 
@@ -144,7 +234,7 @@ async def add_extension_received_document(
         )
 
         # Process chunks
-        chunks = await create_document_chunks(content.pageContent)
+        chunks = await create_document_chunks(normalized_page_content)
 
         from app.utils.blocknote_converter import convert_markdown_to_blocknote
 

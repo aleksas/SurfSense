@@ -14,6 +14,7 @@ import json
 import os
 import re
 from collections.abc import AsyncGenerator
+from html import unescape
 from uuid import UUID
 
 from langchain_core.messages import HumanMessage
@@ -104,6 +105,30 @@ _IMAGE_INTENT_KEYWORDS = (
 _CHUNK_XML_PATTERN = re.compile(
     r"<chunk(?: id='(?P<chunk_id>[^']+)')?><!\[CDATA\[(?P<content>.*?)\]\]></chunk>",
     re.DOTALL,
+)
+_HTML_TAG_PATTERN = re.compile(r"</?[a-zA-Z][^>]{0,200}>")
+_HTML_COMMENT_PATTERN = re.compile(r"<!--.*?-->", re.DOTALL)
+_IMAGE_ONLY_LINK_PATTERN = re.compile(
+    r"^\s*(?:!\[.*?\]\(.*?\)|\[!\[.*?\]\(.*?\)\]\(.*?\))\s*$"
+)
+_STANDALONE_LINK_LINE_PATTERN = re.compile(r"^\s*\[[^\]]{1,80}\]\(https?://[^)]+\)\s*$")
+_BOILERPLATE_SECTION_HEADERS = (
+    "## latest news",
+    "### latest news",
+    "## we also recommend",
+    "### we also recommend",
+    "we also recommend",
+    "## map",
+    "### map",
+)
+_TRACKING_MARKERS = (
+    "smartadserver.com",
+    "creatives.sascdn.com",
+    "gdpr_consent=",
+    "utm_campaign=",
+    "opdt=",
+    "reqid=",
+    "go=https",
 )
 
 
@@ -204,14 +229,53 @@ def _is_lookup_query(user_query: str) -> bool:
     if not q:
         return False
 
-    if re.match(r"^(find|show|quote|return|locate|search for)\\b", q):
+    # Strict: bypass only when user explicitly asks for exact citations/snippets/posts.
+    exact_intent_terms = (
+        "quote",
+        "verbatim",
+        "exact text",
+        "exact match",
+        "citation",
+        "chunk",
+        "source text",
+        "show source",
+        "which post",
+        "which thread",
+        "forum post",
+        "full post",
+        "whole post",
+        "entire post",
+        # LT variants
+        "citata",
+        "tikslus tekstas",
+        "rodyk saltini",
+        "rodyk šaltinį",
+        "kuris irasas",
+        "kuris įrašas",
+        "visa posta",
+        "visą postą",
+    )
+    if any(term in q for term in exact_intent_terms):
         return True
 
-    # Common phrasing patterns in this repo's Celestia forum usage.
-    if "forum post" in q and any(k in q for k in ("find", "return", "show", "quote")):
-        return True
-    if "which post" in q or "which thread" in q:
-        return True
+    # Command-style lookup only when tied to an explicit evidence target.
+    if re.match(r"^(find|show|quote|return|locate|search for|surask|rask|parodyk|pacituok)\b", q):
+        evidence_targets = (
+            "post",
+            "thread",
+            "citation",
+            "chunk",
+            "source",
+            "verbatim",
+            "exact",
+            "citata",
+            "šaltin",
+            "saltin",
+            "įraš",
+            "iras",
+        )
+        if any(t in q for t in evidence_targets):
+            return True
 
     return False
 
@@ -219,6 +283,94 @@ def _is_lookup_query(user_query: str) -> bool:
 def _wants_full_post(user_query: str) -> bool:
     q = (user_query or "").strip().lower()
     return any(k in q for k in ("whole post", "full post", "entire post", "provide the whole post"))
+
+
+def _strip_markdown_boilerplate(text: str) -> str:
+    """Drop common navigation/ads/footer boilerplate from markdown-like page dumps."""
+    out: list[str] = []
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        low = line.lower()
+
+        if low in _BOILERPLATE_SECTION_HEADERS:
+            break
+        if any(marker in low for marker in _TRACKING_MARKERS):
+            continue
+        if low.startswith("[show map]("):
+            continue
+        if _IMAGE_ONLY_LINK_PATTERN.match(line):
+            continue
+        if _STANDALONE_LINK_LINE_PATTERN.match(line):
+            continue
+        if line.count("](") >= 6 and len(line) > 240:
+            continue
+
+        out.append(raw_line)
+
+    cleaned = "\n".join(out).strip()
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
+    return cleaned
+
+
+def _is_low_signal_chunk(content: str) -> bool:
+    """
+    Heuristic filter for retrieval chunks that are mostly boilerplate/link lists.
+    """
+    text = (content or "").strip()
+    if not text:
+        return True
+
+    link_count = text.count("](")
+    image_link_count = text.count("![")
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+    table_lines = sum(1 for ln in lines if ln.startswith("|"))
+
+    # Typical "related news"/promo galleries: mostly image links, little substance.
+    if image_link_count >= 3 and link_count >= 6:
+        return True
+
+    # Very link-dense long lines are usually navigation noise.
+    if len(text) > 900 and link_count >= 12:
+        return True
+
+    # Very large table dumps without descriptive section are usually directory boilerplate.
+    low = text.lower()
+    if table_lines >= 18 and "## description" not in low and "### description" not in low:
+        return True
+
+    return False
+
+
+def _normalize_chunk_content_for_display(content: str) -> str:
+    """
+    Normalize retrieved chunk text for chat display.
+
+    Extension captures may contain raw HTML; convert it to readable markdown/text
+    so lookup bypass output isn't flooded with tags.
+    """
+    text = (content or "").strip()
+    if not text:
+        return ""
+
+    text = _HTML_COMMENT_PATTERN.sub(" ", text)
+    sample = text[:4000].lower()
+    looks_like_html = "<!doctype html" in sample or _HTML_TAG_PATTERN.search(sample)
+
+    if looks_like_html:
+        try:
+            from markdownify import markdownify
+
+            text = markdownify(text, heading_style="ATX", strip=["script", "style"])
+        except Exception:
+            # Fallback: strip tags if markdown conversion fails.
+            text = re.sub(r"<[^>]+>", " ", text)
+
+    text = unescape(text)
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    text = re.sub(r"[ \t]{2,}", " ", text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    text = _strip_markdown_boilerplate(text)
+    return text.strip()
 
 
 def _format_retrieved_docs_for_user(
@@ -258,8 +410,10 @@ def _format_retrieved_docs_for_user(
                 break
 
             chunk_id = ch.get("chunk_id")
-            content = (ch.get("content") or "").strip()
+            content = _normalize_chunk_content_for_display(ch.get("content") or "")
             if not content:
+                continue
+            if _is_low_signal_chunk(content):
                 continue
 
             header = f"### [citation:{chunk_id}]" if chunk_id is not None else "### Chunk"
