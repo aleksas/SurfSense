@@ -1,7 +1,7 @@
 # Force asyncio to use standard event loop before unstructured imports
 import asyncio
 
-from fastapi import APIRouter, Depends, Form, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, Form, HTTPException, UploadFile, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 from sqlalchemy.orm import selectinload
@@ -26,7 +26,7 @@ from app.schemas import (
     DocumentWithChunksRead,
     PaginatedResponse,
 )
-from app.users import current_active_user
+from app.users import current_active_user, current_optional_user
 from app.utils.rbac import check_permission
 
 try:
@@ -46,15 +46,35 @@ router = APIRouter()
 @router.post("/documents")
 async def create_documents(
     request: DocumentsCreate,
+    request_obj: Request,
     session: AsyncSession = Depends(get_async_session),
-    user: User = Depends(current_active_user),
+    user: User = Depends(current_optional_user),
 ):
     """
     Create new documents.
     Requires DOCUMENTS_CREATE permission.
     """
-    try:
-        # Check permission
+    # Check for dedicated API Key
+    api_key = request_obj.headers.get("X-API-Key")
+    if api_key != "surfsense":
+        if not user:
+            raise HTTPException(status_code=401, detail="Invalid token or API key")
+    
+    # If using API key, we might need a default user or skip permission check
+    # For now, let's assume we need to find the search space owner if using API key
+    if not user:
+        # Simple hack: find any admin or the first user who is a member of the search space
+        result = await session.execute(
+            select(User)
+            .join(SearchSpaceMembership)
+            .filter(SearchSpaceMembership.search_space_id == request.search_space_id)
+            .limit(1)
+        )
+        user = result.scalars().first()
+        if not user:
+            raise HTTPException(status_code=403, detail="No user found for this search space")
+    else:
+        # Check permission for JWT users
         await check_permission(
             session,
             user,
@@ -63,6 +83,7 @@ async def create_documents(
             "You don't have permission to create documents in this search space",
         )
 
+    try:
         if request.document_type == DocumentType.EXTENSION:
             from app.tasks.celery_tasks.document_tasks import (
                 process_extension_document_task,

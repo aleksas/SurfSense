@@ -174,7 +174,7 @@ class ChucksHybridSearchRetriever:
               - chunks: list[{chunk_id, content}] for citation-aware prompting
               - document: {id, title, document_type, metadata}
         """
-        from sqlalchemy import func, select, text
+        from sqlalchemy import case, func, select, text
         from sqlalchemy.orm import joinedload
 
         from app.config import config
@@ -270,12 +270,19 @@ class ChucksHybridSearchRetriever:
         # fall back to hybrid (semantic + keyword) so the user still gets results.
 
         async def _exec_hybrid() -> list:
+            # Source boost: Prioritize EXTENSION documents (scraped leads) over general registry files.
+            source_boost = case(
+                (Document.document_type == DocumentType.EXTENSION, 0.5),
+                else_=0.0
+            ).label("source_boost")
+
             final_query = (
                 select(
                     Chunk,
                     (
                         func.coalesce(1.0 / (k + semantic_search_cte.c.rank), 0.0)
                         + func.coalesce(1.0 / (k + keyword_search_cte.c.rank), 0.0)
+                        + source_boost
                     ).label("score"),
                 )
                 .select_from(
@@ -290,6 +297,7 @@ class ChucksHybridSearchRetriever:
                     Chunk.id
                     == func.coalesce(semantic_search_cte.c.id, keyword_search_cte.c.id),
                 )
+                .join(Document, Chunk.document_id == Document.id)
                 .options(joinedload(Chunk.document))
                 .order_by(text("score DESC"))
                 .limit(n_results)

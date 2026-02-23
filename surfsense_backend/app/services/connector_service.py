@@ -267,6 +267,7 @@ class ConnectorService:
             start_date=start_date,
             end_date=end_date,
         )
+        print(f"[DEBUG] _combined_rrf_search type={document_type}: chunk_results={len(chunk_results)}")
         doc_results = await self.document_retriever.hybrid_search(
             query_text=query_text,
             top_k=retriever_top_k,

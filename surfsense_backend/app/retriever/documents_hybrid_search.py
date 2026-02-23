@@ -163,7 +163,7 @@ class DocumentHybridSearchRetriever:
             end_date: Optional end date for filtering documents by updated_at
 
         """
-        from sqlalchemy import func, select, text
+        from sqlalchemy import case, func, select, text
         from sqlalchemy.orm import joinedload
 
         from app.config import config
@@ -250,12 +250,19 @@ class DocumentHybridSearchRetriever:
         # to hybrid (semantic + keyword) rather than returning no results.
 
         async def _exec_hybrid() -> list:
+            # Source boost: Prioritize EXTENSION documents (scraped leads) over general registry files.
+            source_boost = case(
+                (Document.document_type == DocumentType.EXTENSION, 0.5),
+                else_=0.0
+            ).label("source_boost")
+
             final_query = (
                 select(
                     Document,
                     (
                         func.coalesce(1.0 / (k + semantic_search_cte.c.rank), 0.0)
                         + func.coalesce(1.0 / (k + keyword_search_cte.c.rank), 0.0)
+                        + source_boost
                     ).label("score"),
                 )
                 .select_from(

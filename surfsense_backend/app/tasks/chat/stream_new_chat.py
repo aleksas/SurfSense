@@ -608,16 +608,37 @@ async def stream_new_chat(
             await asyncio.sleep(0)
             
             try:
-                # Celestia forum/docs are ingested as FILE docs in this repo.
-                _src, file_docs = await connector_service.search_files(
+                # Presearch should favor investigative leads from EXTENSION captures,
+                # then fill with FILE docs for broad corpus coverage.
+                _ext_src, extension_docs = await connector_service.search_extension(
                     user_query=user_query,
                     search_space_id=search_space_id,
                     top_k=presearch_top_k,
                 )
-                if file_docs:
+                _file_src, file_docs = await connector_service.search_files(
+                    user_query=user_query,
+                    search_space_id=search_space_id,
+                    top_k=presearch_top_k,
+                )
+
+                combined_docs: list[dict] = []
+                seen_doc_ids: set[int] = set()
+                for source_docs in (extension_docs or [], file_docs or []):
+                    for doc in source_docs:
+                        if not isinstance(doc, dict):
+                            continue
+                        doc_info = doc.get("document", {}) or {}
+                        doc_id = doc_info.get("id")
+                        if isinstance(doc_id, int):
+                            if doc_id in seen_doc_ids:
+                                continue
+                            seen_doc_ids.add(doc_id)
+                        combined_docs.append(doc)
+
+                if combined_docs:
                     full_post = _wants_full_post(user_query)
                     presearch_text = _format_retrieved_docs_for_user(
-                        file_docs,
+                        combined_docs,
                         max_docs=presearch_max_docs,
                         max_chunks_per_doc=12 if full_post else 3,
                         max_chars=60_000 if full_post else presearch_max_chars,

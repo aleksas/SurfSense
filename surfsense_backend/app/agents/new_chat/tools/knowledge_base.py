@@ -26,9 +26,9 @@ from app.services.connector_service import ConnectorService
 # Large contexts can trigger deepagents large-tool-result file handoffs, which
 # degrade reliability for simple factual lookups. These tighter limits keep
 # answers grounded while remaining small enough to return inline.
-MAX_DOCS_IN_CONTEXT = 3
-MAX_CHUNKS_PER_DOC_IN_CONTEXT = 6
-MAX_CONTEXT_CHARS = 20_000
+MAX_DOCS_IN_CONTEXT = 10
+MAX_CHUNKS_PER_DOC_IN_CONTEXT = 10
+MAX_CONTEXT_CHARS = 25_000
 
 # Canonical connector values used internally by ConnectorService
 # Includes all document types and search source connectors
@@ -356,6 +356,7 @@ async def search_knowledge_base_async(
         Formatted string with search results
     """
     all_documents = []
+    investigative_leads = []
 
     # Resolve date range (default last 2 years)
     from app.agents.new_chat.utils import resolve_date_range
@@ -365,32 +366,40 @@ async def search_knowledge_base_async(
         end_date=end_date,
     )
 
-    # Prioritize local investigative sources
-    ordered_connectors = []
+    # 1. FORCE SEARCH EXTENSION (INVESTIGATIVE LEADS) FIRST
+    try:
+        _, chunks = await connector_service.search_extension(
+            user_query=query,
+            search_space_id=search_space_id,
+            top_k=5, # Get top 5 web scrapes specifically
+            start_date=resolved_start_date,
+            end_date=resolved_end_date,
+        )
+        investigative_leads.extend(chunks)
+    except Exception as e:
+        print(f"Error searching investigative leads: {e}")
 
-    # Get the list of connectors to search
-    connectors = available_connectors or connectors_to_search or []
+    # 2. SEARCH EVERYTHING ELSE
+    ordered_connectors = []
+    connectors = available_connectors or connectors_to_search
+    if not connectors:
+        connectors = list(_ALL_CONNECTORS)
     
-    # 1. First, check our high-precision structured data (Elasticsearch)
-    if "ELASTICSEARCH_CONNECTOR" in connectors:
-        ordered_connectors.append("ELASTICSEARCH_CONNECTOR")
-    
-    # 2. Second, check our local unified company records (FILE)
-    if "FILE" in connectors:
-        ordered_connectors.append("FILE")
-        
-    # 3. Then add the rest of the requested connectors
     for c in connectors:
-        if c not in ordered_connectors:
+        if c != "EXTENSION" and c in _ALL_CONNECTORS:
             ordered_connectors.append(c)
 
     for connector in ordered_connectors:
         try:
+            # Use a higher retrieval limit for non-priority connectors to ensure we have enough candidates
+            # before the final merge and prioritization.
+            connector_top_k = top_k if connector == "EXTENSION" else top_k * 2
+
             if connector == "YOUTUBE_VIDEO":
                 _, chunks = await connector_service.search_youtube(
                     user_query=query,
                     search_space_id=search_space_id,
-                    top_k=top_k,
+                    top_k=connector_top_k,
                     start_date=resolved_start_date,
                     end_date=resolved_end_date,
                 )
@@ -450,7 +459,7 @@ async def search_knowledge_base_async(
                 _, chunks = await connector_service.search_notion(
                     user_query=query,
                     search_space_id=search_space_id,
-                    top_k=top_k,
+                    top_k=connector_top_k,
                     start_date=resolved_start_date,
                     end_date=resolved_end_date,
                 )
@@ -460,7 +469,7 @@ async def search_knowledge_base_async(
                 _, chunks = await connector_service.search_github(
                     user_query=query,
                     search_space_id=search_space_id,
-                    top_k=top_k,
+                    top_k=connector_top_k,
                     start_date=resolved_start_date,
                     end_date=resolved_end_date,
                 )
@@ -470,7 +479,7 @@ async def search_knowledge_base_async(
                 _, chunks = await connector_service.search_linear(
                     user_query=query,
                     search_space_id=search_space_id,
-                    top_k=top_k,
+                    top_k=connector_top_k,
                     start_date=resolved_start_date,
                     end_date=resolved_end_date,
                 )
@@ -480,7 +489,7 @@ async def search_knowledge_base_async(
                 _, chunks = await connector_service.search_tavily(
                     user_query=query,
                     search_space_id=search_space_id,
-                    top_k=top_k,
+                    top_k=connector_top_k,
                 )
                 all_documents.extend(chunks)
 
@@ -686,11 +695,23 @@ async def search_knowledge_base_async(
             print(f"Error searching connector {connector}: {e}")
             continue
 
-    # Deduplicate by content hash
+    # Combine results: Investigative leads first, then everything else
+    combined_total = investigative_leads + all_documents
+
+    # Investigative Priority: Force EXTENSION documents to the front of the list
+    # so they are guaranteed to be in the Top 10 context provided to the LLM.
+    def _priority_key(d):
+        dtype = (d.get("document", {}) or {}).get("document_type")
+        # Boost EXTENSION to the absolute top
+        return 0 if dtype == "EXTENSION" else 1
+
+    combined_total.sort(key=_priority_key)
+
+    # Deduplicate by content hash while preserving priority order
     seen_doc_ids: set[Any] = set()
     seen_hashes: set[int] = set()
     deduplicated: list[dict[str, Any]] = []
-    for doc in all_documents:
+    for doc in combined_total:
         doc_id = (doc.get("document", {}) or {}).get("id")
         content = (doc.get("content", "") or "").strip()
         content_hash = hash(content)
@@ -807,10 +828,14 @@ Focus searches on these types for best results."""
 
 Use this tool to find documents, notes, files, web pages, and other content that may help answer the user's question.
 
+CRITICAL INVESTIGATIVE PROTOCOL:
+- 'EXTENSION' documents contain real-time web captures and investigative leads. They are the PRIMARY SOURCE OF TRUTH for current findings.
+- 'ELASTICSEARCH_CONNECTOR' contains historical business registry records. Use these for verification, but DO NOT let them override 'EXTENSION' findings.
+- If the user asks about a specific company like 'Brolis', YOU MUST search 'EXTENSION' first.
+
 IMPORTANT:
 - If the user requests a specific source type (e.g. "my notes", "Slack messages"), pass `connectors_to_search=[...]` using the enums below.
-- If `connectors_to_search` is omitted/empty, the system will search broadly.
-- Only connectors that are enabled/configured for this search space are available.{doc_types_info}
+- If `connectors_to_search` is omitted/empty, the system will search broadly.{doc_types_info}
 
 ## Available connector enums for `connectors_to_search`
 

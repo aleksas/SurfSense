@@ -1,6 +1,6 @@
 import logging
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy import func
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
@@ -25,12 +25,29 @@ from app.schemas import (
     SearchSpaceUpdate,
     SearchSpaceWithStats,
 )
-from app.users import current_active_user
+from app.users import current_active_user, current_optional_user
 from app.utils.rbac import check_permission, check_search_space_access
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+
+@router.get("/verify-token")
+async def authenticated_route(
+    request: Request,
+    user: User = Depends(current_optional_user),
+):
+    # Check for dedicated API Key
+    api_key = request.headers.get("X-API-Key")
+    if api_key == "surfsense":
+        return {"message": "API Key is valid"}
+
+    # Otherwise check if a user was authenticated via JWT
+    if user:
+        return {"message": "Token is valid"}
+
+    raise HTTPException(status_code=401, detail="Invalid token or API key")
 
 
 async def create_default_roles_and_membership(
