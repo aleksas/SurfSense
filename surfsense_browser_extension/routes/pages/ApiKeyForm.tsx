@@ -29,25 +29,27 @@ const ApiKeyForm = () => {
 		setLoading(true);
 
 		try {
+			// Support both bearer-token and API-key auth setups.
 			const response = await fetch(await buildBackendUrl("/verify-token"), {
 				method: "GET",
 				headers: {
+					"X-API-Key": apiKey,
 					Authorization: `Bearer ${apiKey}`,
 				},
 			});
-
-			setLoading(false);
 
 			if (response.ok) {
 				// Store the API key as the token
 				await storage.set("token", apiKey);
 				navigation("/");
 			} else {
-				setError("Invalid API key. Please check and try again.");
+				const errText = await response.text();
+				setError(`Invalid key (${response.status}). ${errText.slice(0, 50)}`);
 			}
-		} catch (error) {
+		} catch (error: any) {
+			setError(`Connection failed: ${error.message}`);
+		} finally {
 			setLoading(false);
-			setError("An error occurred. Please try again later.");
 		}
 	};
 
@@ -75,7 +77,7 @@ const ApiKeyForm = () => {
 						<form onSubmit={handleSubmit} className="space-y-4">
 							<div className="space-y-2">
 								<label htmlFor="apiKey" className="text-sm font-medium text-gray-300">
-									API Key
+									API Key / JWT Token
 								</label>
 								<input
 									type="text"
@@ -83,7 +85,7 @@ const ApiKeyForm = () => {
 									value={apiKey}
 									onChange={(e) => setApiKey(e.target.value)}
 									className="w-full px-3 py-2 bg-gray-900/50 border border-gray-700 rounded-md focus:outline-none focus:ring-2 focus:ring-teal-500 text-white placeholder:text-gray-500"
-									placeholder="Enter your API key"
+									placeholder="Enter your key or token"
 								/>
 								{error && <p className="text-red-400 text-sm mt-1">{error}</p>}
 							</div>

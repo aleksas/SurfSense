@@ -134,6 +134,16 @@ const handler: PlasmoMessaging.MessageHandler = async (req, res) => {
 				`${process.env.PLASMO_PUBLIC_BACKEND_URL}/api/v1/documents`,
 				requestOptions
 			);
+
+			if (!response.ok) {
+				const errorText = await response.text();
+				console.error("Backend error:", errorText);
+				res.send({
+					error: `Backend returned ${response.status}: ${errorText.substring(0, 100)}`,
+				});
+				return;
+			}
+
 			const resp = await response.json();
 			if (resp) {
 				await clearMemory();
@@ -141,9 +151,16 @@ const handler: PlasmoMessaging.MessageHandler = async (req, res) => {
 					message: "Save Job Started",
 				});
 			}
+		} else {
+			res.send({
+				message: "No data to save",
+			});
 		}
-	} catch (error) {
+	} catch (error: any) {
 		console.log(error);
+		res.send({
+			error: error.message || "Unknown error occurred",
+		});
 	}
 };
 

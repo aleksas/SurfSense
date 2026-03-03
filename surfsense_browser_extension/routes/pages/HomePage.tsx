@@ -290,9 +290,17 @@ const HomePage = () => {
 				name: "savedata",
 			});
 
-			toast({
-				title: resp.message,
-			});
+			if (resp.error) {
+				toast({
+					title: "Error saving data",
+					description: resp.error,
+					variant: "destructive",
+				});
+			} else {
+				toast({
+					title: resp.message,
+				});
+			}
 		} catch (error) {
 			toast({
 				title: "Error saving data",
