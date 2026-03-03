@@ -12,7 +12,13 @@ chrome.tabs.onCreated.addListener(async (tab: any) => {
 });
 
 chrome.tabs.onUpdated.addListener(async (tabId: number, changeInfo: any, tab: any) => {
-	if (changeInfo.status === "complete" && tab.url) {
+	if (
+		changeInfo.status === "complete" &&
+		tab.url &&
+		!tab.url.startsWith("chrome://") &&
+		!tab.url.startsWith("about:") &&
+		!tab.url.startsWith("devtools://")
+	) {
 		const storage = new Storage({ area: "local" });
 		await initWebHistory(tab.id);
 		await initQueues(tab.id);
@@ -24,7 +30,7 @@ chrome.tabs.onUpdated.addListener(async (tabId: number, changeInfo: any, tab: an
 			func: getRenderedHtml,
 		});
 
-		const toPushInTabHistory: any = result[0].result; // const { renderedHtml, title, url, entryTime } = result[0].result;
+		const toPushInTabHistory: any = result[0].result;
 
 		const urlQueueListObj: any = await storage.get("urlQueueList");
 		const timeQueueListObj: any = await storage.get("timeQueueList");
