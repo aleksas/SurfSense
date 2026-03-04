@@ -12,36 +12,53 @@ chrome.tabs.onCreated.addListener(async (tab: any) => {
 });
 
 chrome.tabs.onUpdated.addListener(async (tabId: number, changeInfo: any, tab: any) => {
-	if (changeInfo.status === "complete" && tab.url) {
+	if (
+		changeInfo.status === "complete" &&
+		tab.url &&
+		!tab.url.startsWith("chrome://") &&
+		!tab.url.startsWith("about:") &&
+		!tab.url.startsWith("devtools://")
+	) {
 		const storage = new Storage({ area: "local" });
 		await initWebHistory(tab.id);
 		await initQueues(tab.id);
+		try {
+			const result = await chrome.scripting.executeScript({
+				// @ts-ignore
+				target: { tabId: tab.id },
+				// @ts-ignore
+				func: getRenderedHtml,
+			});
 
-		const result = await chrome.scripting.executeScript({
-			// @ts-ignore
-			target: { tabId: tab.id },
-			// @ts-ignore
-			func: getRenderedHtml,
-		});
+			const toPushInTabHistory: any = result[0].result; // const { renderedHtml, title, url, entryTime } = result[0].result;
 
-		const toPushInTabHistory: any = result[0].result; // const { renderedHtml, title, url, entryTime } = result[0].result;
+			const urlQueueListObj: any = await storage.get("urlQueueList");
+			const timeQueueListObj: any = await storage.get("timeQueueList");
 
-		const urlQueueListObj: any = await storage.get("urlQueueList");
-		const timeQueueListObj: any = await storage.get("timeQueueList");
+			urlQueueListObj.urlQueueList
+				.find((data: WebHistory) => data.tabsessionId === tabId)
+				.urlQueue.push(toPushInTabHistory.url);
+			timeQueueListObj.timeQueueList
+				.find((data: WebHistory) => data.tabsessionId === tabId)
+				.timeQueue.push(toPushInTabHistory.entryTime);
 
-		urlQueueListObj.urlQueueList
-			.find((data: WebHistory) => data.tabsessionId === tabId)
-			.urlQueue.push(toPushInTabHistory.url);
-		timeQueueListObj.timeQueueList
-			.find((data: WebHistory) => data.tabsessionId === tabId)
-			.timeQueue.push(toPushInTabHistory.entryTime);
+			await storage.set("urlQueueList", {
+				urlQueueList: urlQueueListObj.urlQueueList,
+			});
+			await storage.set("timeQueueList", {
+				timeQueueList: timeQueueListObj.timeQueueList,
+			});
+		} catch (error: any) {
+			const message = String(error?.message || error || "");
+			if (
+				message.includes("No tab with id") ||
+				message.includes("Cannot access a chrome:// URL")
+			) {
+				return;
+			}
 
-		await storage.set("urlQueueList", {
-			urlQueueList: urlQueueListObj.urlQueueList,
-		});
-		await storage.set("timeQueueList", {
-			timeQueueList: timeQueueListObj.timeQueueList,
-		});
+			console.log("Failed to execute script:", error);
+		}
 	}
 });
 
