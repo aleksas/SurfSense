@@ -6,8 +6,9 @@ import { DOMParser } from "linkedom";
 import { getRenderedHtml, webhistoryToLangChainDocument } from "~utils/commons";
 import type { WebHistory } from "~utils/interfaces";
 
+// Extension service workers expose `globalThis`, not Node's `global`.
 // @ts-ignore
-global.Node = {
+globalThis.Node = {
 	ELEMENT_NODE: 1,
 	ATTRIBUTE_NODE: 2,
 	TEXT_NODE: 3,
