@@ -7,6 +7,11 @@ settings:
 overrides:
   sharp: ^0.33.5
 
+patchedDependencies:
+  plasmo@0.90.5:
+    hash: 7f86485e552c814854d1eb9e6b32ad9d1c1d17d20dc234b6e86ff29deb95aa26
+    path: patches/plasmo@0.90.5.patch
+
 importers:
 
   .:
@@ -55,7 +60,7 @@ importers:
         version: 0.454.0(react@18.2.0)
       plasmo:
         specifier: 0.90.5
-        version: 0.90.5(@swc/core@1.7.14(@swc/helpers@0.5.12))(@swc/helpers@0.5.12)(@types/node@20.11.5)(lodash@4.17.21)(postcss@8.4.41)(react-dom@18.2.0(react@18.2.0))(react@18.2.0)
+        version: 0.90.5(patch_hash=7f86485e552c814854d1eb9e6b32ad9d1c1d17d20dc234b6e86ff29deb95aa26)(@swc/core@1.7.14(@swc/helpers@0.5.12))(@swc/helpers@0.5.12)(@types/node@20.11.5)(lodash@4.17.21)(postcss@8.4.41)(react-dom@18.2.0(react@18.2.0))(react@18.2.0)
       postcss-loader:
         specifier: ^8.1.1
         version: 8.1.1(postcss@8.4.41)(typescript@5.3.3)
@@ -8573,7 +8578,7 @@ snapshots:
 
   pirates@4.0.6: {}
 
-  plasmo@0.90.5(@swc/core@1.7.14(@swc/helpers@0.5.12))(@swc/helpers@0.5.12)(@types/node@20.11.5)(lodash@4.17.21)(postcss@8.4.41)(react-dom@18.2.0(react@18.2.0))(react@18.2.0):
+  plasmo@0.90.5(patch_hash=7f86485e552c814854d1eb9e6b32ad9d1c1d17d20dc234b6e86ff29deb95aa26)(@swc/core@1.7.14(@swc/helpers@0.5.12))(@swc/helpers@0.5.12)(@types/node@20.11.5)(lodash@4.17.21)(postcss@8.4.41)(react-dom@18.2.0(react@18.2.0))(react@18.2.0):
     dependencies:
       '@expo/spawn-async': 1.7.2
       '@parcel/core': 2.9.3

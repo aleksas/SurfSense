@@ -11,6 +11,9 @@
 	"pnpm": {
 		"overrides": {
 			"sharp": "^0.33.5"
+		},
+		"patchedDependencies": {
+			"plasmo@0.90.5": "patches/plasmo@0.90.5.patch"
 		}
 	},
 	"scripts": {
