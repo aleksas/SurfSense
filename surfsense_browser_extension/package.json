@@ -19,7 +19,8 @@
 	"scripts": {
 		"dev": "plasmo dev",
 		"build": "plasmo build",
-		"package": "plasmo package"
+		"package": "plasmo package",
+		"build:release": "node scripts/build-release.mjs"
 	},
 	"dependencies": {
 		"@plasmohq/messaging": "^0.6.2",
@@ -54,6 +55,7 @@
 		"@types/react": "18.2.48",
 		"@types/react-dom": "18.2.18",
 		"autoprefixer": "^10.4.20",
+		"esbuild": "^0.25.1",
 		"postcss": "^8.4.41",
 		"tailwindcss": "^3.4.10",
 		"typescript": "5.3.3"
