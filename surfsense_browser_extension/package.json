@@ -4,6 +4,7 @@
 	"version": "0.0.13",
 	"description": "Extension to collect Browsing History for SurfSense.",
 	"author": "https://github.com/MODSetter",
+	"packageManager": "pnpm@10.30.1",
 	"engines": {
 		"node": ">=18.0.0 <23.0.0",
 		"pnpm": ">=8.0.0"

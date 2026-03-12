@@ -1,0 +1,7 @@
+FROM node:20-bookworm
+
+RUN corepack enable && corepack prepare pnpm@10.30.1 --activate
+
+WORKDIR /work
+
+CMD ["bash", "-lc", "rm -rf /work/src && mkdir -p /work/src && cp -a /src/. /work/src && rm -rf /work/src/surfsense_browser_extension/node_modules /work/src/surfsense_browser_extension/build /work/src/surfsense_browser_extension/.plasmo && cd /work/src/surfsense_browser_extension && pnpm install --frozen-lockfile && pnpm build && pnpm package"]
