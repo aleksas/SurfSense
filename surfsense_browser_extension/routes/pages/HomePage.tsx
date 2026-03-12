@@ -1,5 +1,6 @@
 import brain from "data-base64:~assets/brain.png";
 import icon from "data-base64:~assets/icon.png";
+import { sendToBackground } from "@plasmohq/messaging";
 import { Storage } from "@plasmohq/storage";
 import {
 	CrossCircledIcon,
@@ -30,7 +31,6 @@ import { useToast } from "~routes/ui/use-toast";
 import { buildBackendUrl } from "~utils/backend-url";
 import { getRenderedHtml } from "~utils/commons";
 import type { WebHistory } from "~utils/interfaces";
-import { sendRuntimeMessage } from "~utils/runtime-message";
 import Loading from "./Loading";
 
 const HomePage = () => {
@@ -42,12 +42,6 @@ const HomePage = () => {
 	const [value, setValue] = React.useState<string>("");
 	const [searchspaces, setSearchSpaces] = useState([]);
 	const [isSaving, setIsSaving] = useState(false);
-
-	const countHistoryPages = (webhistory: any[] = []) => {
-		return webhistory.reduce((sum, element) => {
-			return sum + (Array.isArray(element?.tabHistory) ? element.tabHistory.length : 0);
-		}, 0);
-	};
 
 	useEffect(() => {
 		const checkSearchSpaces = async () => {
@@ -91,14 +85,15 @@ const HomePage = () => {
 			try {
 				chrome.storage.onChanged.addListener((changes: any, areaName: string) => {
 					if (changes.webhistory) {
-						const rawValue = changes.webhistory.newValue;
-						const parsedValue =
-							typeof rawValue === "string" ? JSON.parse(rawValue) : rawValue;
-						const webhistory = Array.isArray(parsedValue?.webhistory)
-							? parsedValue.webhistory
-							: [];
-						console.log("webhistory", parsedValue);
-						setNoOfWebPages(countHistoryPages(webhistory));
+						const webhistory = JSON.parse(changes.webhistory.newValue);
+						console.log("webhistory", webhistory);
+
+						let sum = 0;
+						webhistory.webhistory.forEach((element: any) => {
+							sum = sum + element.tabHistory.length;
+						});
+
+						setNoOfWebPages(sum);
 					}
 				});
 
@@ -112,10 +107,19 @@ const HomePage = () => {
 				await storage.set("showShadowDom", true);
 
 				const webhistoryObj: any = await storage.get("webhistory");
-				const webhistory = Array.isArray(webhistoryObj?.webhistory)
-					? webhistoryObj.webhistory
-					: [];
-				setNoOfWebPages(countHistoryPages(webhistory));
+				if (webhistoryObj.webhistory.length) {
+					const webhistory = webhistoryObj.webhistory;
+
+					if (webhistoryObj) {
+						let sum = 0;
+						webhistory.forEach((element: any) => {
+							sum = sum + element.tabHistory.length;
+						});
+						setNoOfWebPages(sum);
+					}
+				} else {
+					setNoOfWebPages(0);
+				}
 			} catch (error) {
 				console.log(error);
 			}
@@ -281,7 +285,10 @@ const HomePage = () => {
 		});
 
 		try {
-			const resp = await sendRuntimeMessage<{ message?: string }>("savedata");
+			const resp = await sendToBackground({
+				// @ts-ignore
+				name: "savedata",
+			});
 
 			toast({
 				title: resp.message,
