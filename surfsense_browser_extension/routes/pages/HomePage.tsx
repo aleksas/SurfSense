@@ -107,7 +107,7 @@ const HomePage = () => {
 				await storage.set("showShadowDom", true);
 
 				const webhistoryObj: any = await storage.get("webhistory");
-				if (webhistoryObj.webhistory.length) {
+				if (webhistoryObj?.webhistory?.length) {
 					const webhistory = webhistoryObj.webhistory;
 
 					if (webhistoryObj) {
